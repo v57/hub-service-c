@@ -43,6 +43,7 @@ endif()
 # ---------------------------------------------------------------------------
 add_library(hub_service_c STATIC
   src/hub_service_c.c
+  src/keychain.c
 )
 
 target_include_directories(hub_service_c
@@ -73,3 +74,8 @@ add_executable(test_service tests/test_service.c)
 target_include_directories(test_service PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(test_service PRIVATE hub_service_c PkgConfig::CMOCKA)
 add_test(NAME unit_service COMMAND test_service)
+
+add_executable(test_keychain tests/test_keychain.c)
+target_include_directories(test_keychain PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_link_libraries(test_keychain PRIVATE hub_service_c PkgConfig::CMOCKA)
+add_test(NAME unit_keychain COMMAND test_keychain)

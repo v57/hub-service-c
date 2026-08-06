@@ -18,6 +18,7 @@
 #include <yyjson.h>
 
 #include "hub-service-c/hub_service_c.h"
+#include "hub-service-c/keychain.h"
 
 /* ------------------------------------------------------------------ */
 /* dynamic string buffer for JSON building                             */
@@ -404,11 +405,44 @@ hub_service_t *hub_service_new(const hub_service_options_t *options, char **out_
   if (options && options->address) {
     address = options->address;
   } else if (getenv("HUB") && getenv("HUB")[0]) {
-    address = getenv("HUB");
+    /* Accept a bare port number from $HUB (e.g. "1998") and normalize it to a
+       ws:// URL — the channel-c client requires a full websocket URL. */
+    const char *hub = getenv("HUB");
+    bool numeric = hub[0] != '\0';
+    for (const char *p = hub; *p; p++) {
+      if (*p < '0' || *p > '9') { numeric = false; break; }
+    }
+    if (numeric) {
+      char buf[64];
+      snprintf(buf, sizeof(buf), "ws://127.0.0.1:%s", hub);
+      address = buf;
+    } else {
+      address = hub;
+    }
   } else {
     address = "ws://127.0.0.1:1997";
   }
-  service->address = channel_c_strdup(address);
+  /* hub-pro auth: append the signed token as query params (the channel-c
+     client takes a URL; the hub reads query params as headers). The token
+     is generated once per process — hub-pro reads the decimal expiry as
+     base-36, so the signature stays valid across reconnects. */
+  {
+    char *with_auth = (char *)malloc(strlen(address) + 1024);
+    char auth_query[1024];
+    if (!with_auth) {
+      hub_service_free(service);
+      if (out_error) *out_error = channel_c_strdup("internal error");
+      return NULL;
+    }
+    if (hub_service_keychain_auth_query(auth_query, sizeof(auth_query)) != 0) {
+      free(with_auth);
+      hub_service_free(service);
+      if (out_error) *out_error = channel_c_strdup("keychain failed");
+      return NULL;
+    }
+    snprintf(with_auth, strlen(address) + 1024, "%s%s", address, auth_query);
+    service->address = with_auth;
+  }
   if (options && options->name) service->name = channel_c_strdup(options->name);
   if (options && options->icon) service->icon = channel_c_strdup(options->icon);
 
