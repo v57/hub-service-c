@@ -14,14 +14,16 @@ pkg_check_modules(CMOCKA REQUIRED IMPORTED_TARGET cmocka)
 # ---------------------------------------------------------------------------
 # sibling channel-c dependency (read-only; never edited by this repo)
 #
-# Prefer channel-c's build tree (fast, keeps this project's ctest output
-# focused on hub_service_c tests). Fall back to add_subdirectory on the
-# sibling source tree when no build tree exists yet.
+# Build channel-c from the sibling source tree so its fixes are always picked
+# up. Set HUB_SERVICE_C_PREBUILT_CHANNEL=ON to link channel-c's own build/
+# tree instead (faster, but it can be stale).
 # ---------------------------------------------------------------------------
 set(CHANNEL_C_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../channel-c")
 
+option(HUB_SERVICE_C_PREBUILT_CHANNEL "Link channel-c's prebuilt build/libchannel_c.a" OFF)
+
 if(NOT TARGET channel_c)
-  if(EXISTS "${CHANNEL_C_DIR}/build/libchannel_c.a")
+  if(HUB_SERVICE_C_PREBUILT_CHANNEL AND EXISTS "${CHANNEL_C_DIR}/build/libchannel_c.a")
     add_library(channel_c STATIC IMPORTED)
     set_target_properties(channel_c PROPERTIES
       IMPORTED_LOCATION "${CHANNEL_C_DIR}/build/libchannel_c.a"

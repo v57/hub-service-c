@@ -3,6 +3,6 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-cmake -B build
-cmake --build build
-ctest --test-dir build
+cmake --fresh -B build-test
+cmake --build build-test
+ctest --test-dir build-test --output-on-failure

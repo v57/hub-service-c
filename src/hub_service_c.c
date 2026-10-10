@@ -393,6 +393,7 @@ static void app_interface_stream_handler(const channel_c_stream_request_t *reque
 hub_service_t *hub_service_new(const hub_service_options_t *options, char **out_error) {
   hub_service_t *service;
   const char *address = NULL;
+  char hub_url[64];
 
   if (out_error) *out_error = NULL;
 
@@ -413,35 +414,19 @@ hub_service_t *hub_service_new(const hub_service_options_t *options, char **out_
       if (*p < '0' || *p > '9') { numeric = false; break; }
     }
     if (numeric) {
-      char buf[64];
-      snprintf(buf, sizeof(buf), "ws://127.0.0.1:%s", hub);
-      address = buf;
+      snprintf(hub_url, sizeof(hub_url), "ws://127.0.0.1:%s", hub);
+      address = hub_url;
     } else {
       address = hub;
     }
   } else {
     address = "ws://127.0.0.1:1997";
   }
-  /* hub-pro auth: append the signed token as query params (the channel-c
-     client takes a URL; the hub reads query params as headers). The token
-     is generated once per process — hub-pro reads the decimal expiry as
-     base-36, so the signature stays valid across reconnects. */
-  {
-    char *with_auth = (char *)malloc(strlen(address) + 1024);
-    char auth_query[1024];
-    if (!with_auth) {
-      hub_service_free(service);
-      if (out_error) *out_error = channel_c_strdup("internal error");
-      return NULL;
-    }
-    if (hub_service_keychain_auth_query(auth_query, sizeof(auth_query)) != 0) {
-      free(with_auth);
-      hub_service_free(service);
-      if (out_error) *out_error = channel_c_strdup("keychain failed");
-      return NULL;
-    }
-    snprintf(with_auth, strlen(address) + 1024, "%s%s", address, auth_query);
-    service->address = with_auth;
+  service->address = channel_c_strdup(address);
+  if (!service->address) {
+    hub_service_free(service);
+    if (out_error) *out_error = channel_c_strdup("internal error");
+    return NULL;
   }
   if (options && options->name) service->name = channel_c_strdup(options->name);
   if (options && options->icon) service->icon = channel_c_strdup(options->icon);
@@ -678,7 +663,26 @@ int hub_service_start(hub_service_t *service, char **out_error) {
   }
   if (service->client) return 0; /* already started */
 
-  service->client = channel_c_client_connect(service->channel, service->address, NULL, NULL, out_error);
+  /* hub-pro auth: send a freshly signed token as handshake headers (as TS does), not as URL query
+     params, so it never ends up in proxy or access logs. */
+  {
+    char token[512];
+    channel_c_header_t headers[2];
+    channel_c_client_options_t client_options;
+
+    if (hub_service_keychain_sign(token, sizeof(token)) != 0) {
+      if (out_error) *out_error = channel_c_strdup("keychain failed");
+      return -1;
+    }
+    headers[0].name = "auth";
+    headers[0].value = token;
+    headers[1].name = "v";
+    headers[1].value = "0";
+    memset(&client_options, 0, sizeof(client_options));
+    client_options.headers = headers;
+    client_options.header_count = 2;
+    service->client = channel_c_client_connect_with_options(service->channel, service->address, &client_options, out_error);
+  }
   if (!service->client) return -1;
 
   service->was_connected = 0; /* first poll sees 0->1 and sends updates */
