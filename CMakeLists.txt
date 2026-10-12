@@ -18,7 +18,7 @@ pkg_check_modules(CMOCKA REQUIRED IMPORTED_TARGET cmocka)
 # up. Set HUB_SERVICE_C_PREBUILT_CHANNEL=ON to link channel-c's own build/
 # tree instead (faster, but it can be stale).
 # ---------------------------------------------------------------------------
-set(CHANNEL_C_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../channel-c")
+set(CHANNEL_C_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../Channel/channel-c")
 
 option(HUB_SERVICE_C_PREBUILT_CHANNEL "Link channel-c's prebuilt build/libchannel_c.a" OFF)
 
