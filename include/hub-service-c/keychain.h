@@ -45,6 +45,10 @@ int hub_service_keychain_sign_for_hub(const char *hub_key, char *out, size_t out
  */
 int hub_service_auth_token(const char *key_file, const char *hub_key, long long expiry, char *out, size_t out_size);
 
+/* Write the base64 signature of the service key over data (the hub-net
+ * agent's challenge nonce, for example). */
+int hub_service_keychain_sign_data(const char *data, char *out, size_t out_size);
+
 /* Write the service's public key (base64 of the 44-byte SPKI DER). */
 int hub_service_keychain_public_key(char *out, size_t out_size);
 

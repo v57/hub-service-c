@@ -48,6 +48,7 @@ add_library(hub_service_c STATIC
   src/keychain.c
   src/crypto.c
   src/device.c
+  src/network.c
 )
 
 target_include_directories(hub_service_c
@@ -102,6 +103,12 @@ target_include_directories(test_device PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(test_device PRIVATE hub_service_c PkgConfig::CMOCKA)
 add_test(NAME unit_device COMMAND test_device)
 
+find_package(Threads REQUIRED)
+add_executable(test_network tests/test_network.c)
+target_include_directories(test_network PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_link_libraries(test_network PRIVATE hub_service_c PkgConfig::CMOCKA Threads::Threads)
+add_test(NAME network_shares COMMAND test_network)
+
 # No test may create the real ~/.hub/device.key.
-set_tests_properties(unit_service unit_keychain unit_vectors hub_flow unit_device PROPERTIES
+set_tests_properties(unit_service unit_keychain unit_vectors hub_flow unit_device network_shares PROPERTIES
   ENVIRONMENT "HUB_DEVICE_KEY=${CMAKE_CURRENT_BINARY_DIR}/test-device.key")

@@ -29,6 +29,7 @@
 #include "hub-service-c/device.h"
 #include "hub-service-c/keychain.h"
 #include "hub_service_internal.h"
+#include "network_internal.h"
 
 /* ------------------------------------------------------------------ */
 /* dynamic string buffer for JSON building                             */
@@ -205,6 +206,8 @@ struct hub_service {
   int disable_device;
   char *certificate; /* current `device` header value, renewed by connect */
   long long certificate_exp;
+
+  hs_network_t *network; /* declared Hub Network shares */
 
   int started;       /* between hub_service_start and hub_service_stop */
   int hub_key_known; /* the current connection used a pinned hub key (v1) */
@@ -465,7 +468,8 @@ hub_service_t *hub_service_new(const hub_service_options_t *options, char **out_
   service->disable_device = (options && options->disable_device) || !hub_service_device_mode_enabled();
 
   service->channel = channel_c_channel_new();
-  if (!service->channel) {
+  service->network = hs_network_new();
+  if (!service->channel || !service->network) {
     hub_service_free(service);
     if (out_error) *out_error = channel_c_strdup("internal error");
     return NULL;
@@ -479,6 +483,7 @@ void hub_service_free(hub_service_t *service) {
   if (!service) return;
   if (service->client) channel_c_client_free(service->client);
   if (service->channel) channel_c_channel_free(service->channel);
+  hs_network_free(service->network);
 
   free(service->address);
   free(service->pin_address);
@@ -894,6 +899,13 @@ int hub_service_poll(hub_service_t *service) {
       service->was_connected = 0;
       return 0;
     }
+    if (hs_network_has_shares(service->network)) {
+      char *error = NULL;
+      if (hs_network_republish(service->network, channel_c_client_sender(service->client), &error) != 0) {
+        fprintf(stderr, "hub-service-c: failed to republish network shares: %s\n", error ? error : "unknown error");
+      }
+      free(error);
+    }
   } else if (!connected && service->was_connected) {
     /* 1->0 transition: the channel-c client does not auto-reconnect, so
      * release it; the next poll redials a fresh client (handlers live on the
@@ -919,6 +931,41 @@ void hub_service_stop(hub_service_t *service) {
 int hub_service_forget_hub_key(hub_service_t *service) {
   if (!service) return -1;
   return hub_service_keychain_forget_hub_key(service->pin_address);
+}
+
+/* ------------------------------------------------------------------ */
+/* Hub Network shares                                                  */
+/* ------------------------------------------------------------------ */
+
+static channel_c_sender_t *connected_sender(hub_service_t *service) {
+  if (!service || !service->client || !channel_c_client_is_connected(service->client)) return NULL;
+  return channel_c_client_sender(service->client);
+}
+
+int hub_service_share(hub_service_t *service, const hub_service_share_t *share, char **out_error) {
+  if (out_error) *out_error = NULL;
+  if (!service) return -1;
+  return hs_network_declare(service->network, share, out_error);
+}
+
+int hub_service_publish_share(hub_service_t *service, const hub_service_share_t *share, char **out_error) {
+  if (out_error) *out_error = NULL;
+  if (!service) return -1;
+  return hs_network_publish(service->network, connected_sender(service), share, out_error);
+}
+
+int hub_service_remove_share(hub_service_t *service, const char *name, char **out_error) {
+  if (out_error) *out_error = NULL;
+  if (!service) return -1;
+  return hs_network_remove(service->network, connected_sender(service), name, out_error);
+}
+
+char *hub_service_share_publications(const hub_service_t *service) {
+  return hs_network_publications(service ? service->network : NULL);
+}
+
+void hub_service_set_agent_socket(hub_service_t *service, const char *path, int timeout_ms) {
+  if (service) hs_network_set_socket(service->network, path, timeout_ms);
 }
 
 /* ------------------------------------------------------------------ */

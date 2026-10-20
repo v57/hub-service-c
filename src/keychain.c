@@ -88,6 +88,17 @@ int hub_service_keychain_sign_for_hub(const char *hub_key, char *out, size_t out
   return 0;
 }
 
+int hub_service_keychain_sign_data(const char *data, char *out, size_t out_size) {
+  unsigned char key_bytes[HS_KEY_BYTES];
+  char sig[HS_SIG_B64_SIZE];
+  if (!data || load_or_generate(key_bytes) != 0 || hs_key_sign(key_bytes, data, strlen(data), sig) != 0 ||
+      snprintf(out, out_size, "%s", sig) >= (int)out_size) {
+    out[0] = '\0';
+    return -1;
+  }
+  return 0;
+}
+
 int hub_service_keychain_sign(char *out, size_t out_size) {
   return hub_service_keychain_sign_for_hub(NULL, out, out_size);
 }
