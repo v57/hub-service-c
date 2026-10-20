@@ -13,7 +13,9 @@ extern "C" {
  * hub_service_c: lite C port of hub-service (TS reference).
  * Registers post/stream API endpoints and hub apps on a hub (hub-lite/hub-pro)
  * and calls API through the hub. Authenticates with the keychain `auth` key
- * (see keychain.h): v0 until hub/info pins the hub key, then v1.
+ * (see keychain.h): v0 until hub/info pins the hub key, then v1. Unless
+ * disabled, every connect also sends a certificate for the service key signed
+ * by the device key (see device.h), renewed when less than a day is left.
  */
 
 typedef struct hub_service hub_service_t;
@@ -26,6 +28,16 @@ typedef struct {
   const char *name;
   /* Profile icon as a JSON fragment (optional): "{"symbol":..,"text":..}" or "\"symbol\"". */
   const char *icon;
+  /* Instance name in the device certificate, unique per device
+   * ("s3-local/Backup Disk"). NULL -> name, else the first segment of the
+   * first registered path, else "service". */
+  const char *instance;
+  /* Suggested device name in the certificate. NULL -> the host name. */
+  const char *device_name;
+  /* Declared parent device name, for containers and VMs (optional). */
+  const char *parent;
+  /* Non-zero: no device key and no `device` header (a plain key connection). */
+  int disable_device;
 } hub_service_options_t;
 
 /* Per-path settings for the hub/service/update payload (pro-only wire parity;

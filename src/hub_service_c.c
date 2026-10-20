@@ -20,10 +20,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <yyjson.h>
 
 #include "hub-service-c/hub_service_c.h"
+#include "hub-service-c/device.h"
 #include "hub-service-c/keychain.h"
 #include "hub_service_internal.h"
 
@@ -194,6 +196,13 @@ struct hub_service {
   char **app_interfaces; /* prebuilt AppInterface JSON per app (parallel) */
 
   int was_connected;
+  char *instance;    /* certificate instance option or NULL */
+  char *device_name; /* certificate device name option or NULL */
+  char *parent;      /* certificate parent option or NULL */
+  int disable_device;
+  char *certificate; /* current `device` header value, renewed by connect */
+  long long certificate_exp;
+
   int started;       /* between hub_service_start and hub_service_stop */
   int hub_key_known; /* the current connection used a pinned hub key (v1) */
 };
@@ -439,6 +448,10 @@ hub_service_t *hub_service_new(const hub_service_options_t *options, char **out_
   }
   if (options && options->name) service->name = channel_c_strdup(options->name);
   if (options && options->icon) service->icon = channel_c_strdup(options->icon);
+  if (options && options->instance) service->instance = channel_c_strdup(options->instance);
+  if (options && options->device_name) service->device_name = channel_c_strdup(options->device_name);
+  if (options && options->parent) service->parent = channel_c_strdup(options->parent);
+  if (options) service->disable_device = options->disable_device;
 
   service->channel = channel_c_channel_new();
   if (!service->channel) {
@@ -459,6 +472,10 @@ void hub_service_free(hub_service_t *service) {
   free(service->address);
   free(service->name);
   free(service->icon);
+  free(service->instance);
+  free(service->device_name);
+  free(service->parent);
+  free(service->certificate);
 
   for (index = 0; index < service->paths_count; index += 1) {
     free(service->paths[index].path);
@@ -668,8 +685,51 @@ static void service_send_updates(hub_service_t *service) {
   }
 }
 
+/* The certificate instance: the option, else the profile name, else the
+ * first segment of the first registered path, else "service". */
+static char *service_instance(const hub_service_t *service) {
+  const char *slash;
+  char *segment;
+  if (service->instance && service->instance[0]) return channel_c_strdup(service->instance);
+  if (service->name && service->name[0]) return channel_c_strdup(service->name);
+  if (service->paths_count > 0 && service->paths[0].path[0]) {
+    slash = strchr(service->paths[0].path, '/');
+    if (!slash) return channel_c_strdup(service->paths[0].path);
+    segment = (char *)malloc((size_t)(slash - service->paths[0].path) + 1);
+    if (segment) {
+      memcpy(segment, service->paths[0].path, (size_t)(slash - service->paths[0].path));
+      segment[slash - service->paths[0].path] = '\0';
+    }
+    return segment;
+  }
+  return channel_c_strdup("service");
+}
+
+const char *hub_service_current_certificate(hub_service_t *service, long long now) {
+  char service_key[128];
+  char *instance;
+  char *certificate;
+
+  if (!service || service->disable_device) return NULL;
+  if (service->certificate && service->certificate_exp - now >= HUB_SERVICE_CERTIFICATE_RENEW) {
+    return service->certificate;
+  }
+  if (hub_service_keychain_public_key(service_key, sizeof(service_key)) != 0) return service->certificate;
+  instance = service_instance(service);
+  if (!instance) return service->certificate;
+  /* A device key that can't be read or created leaves a plain key connection. */
+  certificate = hub_service_device_certificate(service_key, instance, service->device_name, service->parent, now);
+  free(instance);
+  if (!certificate) return NULL;
+  free(service->certificate);
+  service->certificate = certificate;
+  service->certificate_exp = now + HUB_SERVICE_CERTIFICATE_LIFETIME;
+  return service->certificate;
+}
+
 int hub_service_build_connect_headers(hub_service_t *service, hub_service_connect_headers_t *out) {
   char hub_key[128];
+  const char *certificate;
 
   memset(out, 0, sizeof(*out));
   service->hub_key_known = hub_service_keychain_hub_key(service->address, hub_key, sizeof(hub_key)) == 0;
@@ -682,6 +742,12 @@ int hub_service_build_connect_headers(hub_service_t *service, hub_service_connec
   out->items[1].name = "v";
   out->items[1].value = out->v;
   out->count = 2;
+  certificate = hub_service_current_certificate(service, (long long)time(NULL));
+  if (certificate) {
+    out->items[2].name = "device";
+    out->items[2].value = certificate;
+    out->count = 3;
+  }
   return 0;
 }
 

@@ -18,7 +18,8 @@ char *hub_service_build_profile_json(const hub_service_t *service);
 char *hub_service_build_app_interface_json(const hub_service_app_t *app);
 
 /* Handshake headers for the next connect: auth (v1 when a hub key is pinned
- * for the address, else v0) and v. items point into the struct. */
+ * for the address, else v0), v and, unless device mode is off, device.
+ * items point into the struct and the service. */
 typedef struct {
   char auth[512];
   char v[2];
@@ -28,5 +29,10 @@ typedef struct {
 
 int hub_service_build_connect_headers(hub_service_t *service, hub_service_connect_headers_t *out);
 void hub_service_connect_headers_free(hub_service_connect_headers_t *headers);
+
+/* The `device` header for a connect at now: the cached certificate, or a new
+ * one when there is none or less than HUB_SERVICE_CERTIFICATE_RENEW is left.
+ * NULL when device mode is off or the device key is unavailable. */
+const char *hub_service_current_certificate(hub_service_t *service, long long now);
 
 #endif /* HUB_SERVICE_C_INTERNAL_H */

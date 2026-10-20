@@ -13,6 +13,7 @@
 #include <cmocka.h>
 
 #include "hub-service-c/hub_service_c.h"
+#include "hub-service-c/device.h"
 #include "hub-service-c/keychain.h"
 #include "hub_service_internal.h"
 
@@ -70,6 +71,11 @@ static int setup(void **state) {
   mkdir(test_dir, 0700);
   snprintf(test_auth_path, sizeof(test_auth_path), "%s/auth", test_dir);
   hub_service_keychain_set_path(test_auth_path);
+  {
+    char device_path[320];
+    snprintf(device_path, sizeof(device_path), "%s/device.key", test_dir);
+    hub_service_device_set_path(device_path);
+  }
   connect_count = 0;
   *state = fixture;
   return 0;
@@ -85,6 +91,7 @@ static int teardown(void **state) {
   snprintf(cmd, sizeof(cmd), "rm -rf %s", test_dir);
   system(cmd);
   hub_service_keychain_set_path(NULL);
+  hub_service_device_set_path(NULL);
   return 0;
 }
 
@@ -151,7 +158,7 @@ static void test_headers_follow_the_pin(void **state) {
 
   /* no pin: v0 */
   assert_int_equal(hub_service_build_connect_headers(fixture->service, &headers), 0);
-  assert_int_equal(headers.count, 2);
+  assert_int_equal(headers.count, 3); /* auth, v, device */
   assert_string_equal(headers.items[0].name, "auth");
   assert_string_equal(headers.items[1].name, "v");
   assert_string_equal(headers.items[1].value, "0");
