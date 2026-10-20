@@ -9,6 +9,7 @@
 #include <yyjson.h>
 
 #include "hub-service-c/device.h"
+#include "hub-service-c/hub_service_c.h"
 #include "hub-service-c/keychain.h"
 
 #ifndef HUB_DEVICE_VECTORS
@@ -109,6 +110,24 @@ static void test_device_id_and_safety_code(void **state) {
   assert_string_equal(code, vector("/keys/device/safetyCode"));
 }
 
+static void test_caller(void **state) {
+  (void)state;
+  char *context = yyjson_val_write(yyjson_ptr_get(yyjson_doc_get_root(vectors), "/caller/context"), 0, NULL);
+  hub_service_caller_t *caller = hub_service_caller(context);
+  assert_non_null(caller);
+  assert_string_equal(caller->key, vector("/keys/service/publicKey"));
+  assert_string_equal(caller->device_id, vector("/keys/device/deviceId"));
+  assert_string_equal(caller->device_name, "Mac Studio");
+  assert_int_equal(caller->group_count, 1);
+  assert_string_equal(caller->groups[0], "owners");
+  assert_true(caller->owner);
+  assert_null(caller->via);
+  assert_null(caller->claimed_json);
+  assert_string_equal(caller->hub_key, vector("/keys/hub/publicKey"));
+  hub_service_caller_free(caller);
+  free(context);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_auth_v0),
@@ -116,6 +135,7 @@ int main(void) {
       cmocka_unit_test(test_certificate),
       cmocka_unit_test(test_child_certificate),
       cmocka_unit_test(test_device_id_and_safety_code),
+      cmocka_unit_test(test_caller),
   };
   return cmocka_run_group_tests(tests, load_vectors, free_vectors);
 }

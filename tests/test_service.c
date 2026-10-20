@@ -191,6 +191,36 @@ static void test_app_interface_shape(void **state) {
   channel_c_free(interface_json);
 }
 
+static void test_caller_anonymous_and_merged(void **state) {
+  (void)state;
+  hub_service_caller_t *caller;
+
+  /* no hub context (hub-lite, or not through a hub) */
+  assert_null(hub_service_caller(NULL));
+  assert_null(hub_service_caller("{}"));
+  assert_null(hub_service_caller("{\"service\":\"abc\"}"));
+
+  /* anonymous: no key, no device */
+  caller = hub_service_caller("{\"hub\":{\"caller\":{\"groups\":[],\"owner\":false},\"hubKey\":\"H\"}}");
+  assert_non_null(caller);
+  assert_null(caller->key);
+  assert_null(caller->device_id);
+  assert_int_equal(caller->group_count, 0);
+  assert_false(caller->owner);
+  hub_service_caller_free(caller);
+
+  /* through a merged hub */
+  caller = hub_service_caller("{\"hub\":{\"caller\":{\"key\":\"M\",\"groups\":[\"g1\",\"g2\"],\"owner\":false,"
+                              "\"via\":\"V\",\"claimed\":{\"key\":\"K\",\"owner\":true}},\"hubKey\":\"H\"}}");
+  assert_non_null(caller);
+  assert_string_equal(caller->key, "M");
+  assert_int_equal(caller->group_count, 2);
+  assert_string_equal(caller->groups[1], "g2");
+  assert_string_equal(caller->via, "V");
+  assert_string_equal(caller->claimed_json, "{\"key\":\"K\",\"owner\":true}");
+  hub_service_caller_free(caller);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
     cmocka_unit_test(test_services_list_includes_registered_paths),
@@ -199,6 +229,7 @@ int main(void) {
     cmocka_unit_test(test_update_json_matches_wire_contract),
     cmocka_unit_test(test_send_before_start_errors),
     cmocka_unit_test(test_app_interface_shape),
+    cmocka_unit_test(test_caller_anonymous_and_merged),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

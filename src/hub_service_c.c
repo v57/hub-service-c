@@ -872,6 +872,74 @@ int hub_service_forget_hub_key(hub_service_t *service) {
 }
 
 /* ------------------------------------------------------------------ */
+/* caller identity                                                     */
+/* ------------------------------------------------------------------ */
+
+static char *json_strdup(yyjson_val *value) {
+  return yyjson_is_str(value) ? channel_c_strdup(yyjson_get_str(value)) : NULL;
+}
+
+hub_service_caller_t *hub_service_caller(const char *context_json) {
+  yyjson_doc *doc;
+  yyjson_val *hub;
+  yyjson_val *caller;
+  yyjson_val *device;
+  yyjson_val *groups;
+  yyjson_val *claimed;
+  hub_service_caller_t *result = NULL;
+
+  if (!context_json) return NULL;
+  doc = yyjson_read(context_json, strlen(context_json), 0);
+  hub = yyjson_obj_get(yyjson_doc_get_root(doc), "hub");
+  caller = yyjson_obj_get(hub, "caller");
+  if (!yyjson_is_obj(caller)) goto done;
+
+  result = (hub_service_caller_t *)calloc(1, sizeof(hub_service_caller_t));
+  if (!result) goto done;
+  result->key = json_strdup(yyjson_obj_get(caller, "key"));
+  device = yyjson_obj_get(caller, "device");
+  if (yyjson_is_obj(device)) {
+    result->device_id = json_strdup(yyjson_obj_get(device, "id"));
+    result->device_name = json_strdup(yyjson_obj_get(device, "name"));
+  }
+  groups = yyjson_obj_get(caller, "groups");
+  if (yyjson_is_arr(groups) && yyjson_arr_size(groups) > 0) {
+    size_t index;
+    size_t max;
+    yyjson_val *group;
+    result->groups = (char **)calloc(yyjson_arr_size(groups), sizeof(char *));
+    if (result->groups) {
+      yyjson_arr_foreach(groups, index, max, group) {
+        if (yyjson_is_str(group)) result->groups[result->group_count++] = channel_c_strdup(yyjson_get_str(group));
+      }
+    }
+  }
+  result->owner = yyjson_is_true(yyjson_obj_get(caller, "owner"));
+  result->via = json_strdup(yyjson_obj_get(caller, "via"));
+  claimed = yyjson_obj_get(caller, "claimed");
+  if (claimed && !yyjson_is_null(claimed)) result->claimed_json = yyjson_val_write(claimed, 0, NULL);
+  result->hub_key = json_strdup(yyjson_obj_get(hub, "hubKey"));
+
+done:
+  yyjson_doc_free(doc);
+  return result;
+}
+
+void hub_service_caller_free(hub_service_caller_t *caller) {
+  size_t index;
+  if (!caller) return;
+  free(caller->key);
+  free(caller->device_id);
+  free(caller->device_name);
+  for (index = 0; index < caller->group_count; index++) free(caller->groups[index]);
+  free(caller->groups);
+  free(caller->via);
+  free(caller->claimed_json);
+  free(caller->hub_key);
+  free(caller);
+}
+
+/* ------------------------------------------------------------------ */
 /* client calls through the hub                                        */
 /* ------------------------------------------------------------------ */
 

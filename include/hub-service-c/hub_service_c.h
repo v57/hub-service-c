@@ -83,6 +83,30 @@ typedef struct {
 } hub_service_action_t;
 
 /*
+ * Who is calling (Docs/Devices/protocol.md section 4). The hub replaces any
+ * client-supplied context.hub, so handlers can trust it. All strings owned.
+ */
+typedef struct {
+  char *key;          /* caller SPKI; NULL for anonymous callers */
+  char *device_id;    /* caller's device; NULL unless the connection is device-attached */
+  char *device_name;
+  char **groups;      /* groups of the key or its device */
+  size_t group_count;
+  int owner;          /* member of the owners group */
+  char *via;          /* merged hub SPKI when the call came through a merged hub, else NULL */
+  char *claimed_json; /* the merged hub's own caller (unverified) as JSON, else NULL */
+  char *hub_key;      /* the forwarding hub's key (context.hub.hubKey), or NULL */
+} hub_service_caller_t;
+
+/*
+ * The caller of a request from its context JSON (request->context_json in
+ * post and stream handlers). NULL when the context has no hub caller (hub-lite,
+ * or a call that didn't come through a hub). Free with hub_service_caller_free.
+ */
+hub_service_caller_t *hub_service_caller(const char *context_json);
+void hub_service_caller_free(hub_service_caller_t *caller);
+
+/*
  * Create a service. options may be NULL.
  * Returns NULL (with *out_error set when non-NULL) on failure.
  */

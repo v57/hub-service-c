@@ -34,6 +34,30 @@ static void *count_connect(const channel_c_headers_t *headers, void *user_data) 
   return NULL;
 }
 
+static channel_c_sender_t *hub_sender;
+
+static void remember_sender(void *state, channel_c_sender_t *sender, void *user_data) {
+  (void)state;
+  (void)user_data;
+  hub_sender = sender;
+}
+
+/* who: replies with the caller's key, device name and owner flag */
+static int who_handler(const channel_c_post_request_t *request, char **out_body_json, char **out_error) {
+  hub_service_caller_t *caller = hub_service_caller(request->context_json);
+  char reply[512];
+  (void)out_error;
+  if (!caller) {
+    *out_body_json = channel_c_strdup("null");
+    return 0;
+  }
+  snprintf(reply, sizeof(reply), "\"%s|%s|%d\"", caller->key ? caller->key : "-",
+           caller->device_name ? caller->device_name : "-", caller->owner);
+  hub_service_caller_free(caller);
+  *out_body_json = channel_c_strdup(reply);
+  return 0;
+}
+
 static char *read_key_file(void) {
   static char key_file[256];
   FILE *f = fopen(test_auth_path, "rb");
@@ -107,6 +131,8 @@ static void start_hub(fixture_t *fixture, int answers_info) {
   if (answers_info) channel_c_channel_post(fixture->channel, "hub/info", reply_info, NULL, 0);
   memset(&factory, 0, sizeof(factory));
   factory.create_with_headers = count_connect;
+  factory.on_connect = remember_sender;
+  hub_sender = NULL;
   fixture->server = channel_c_server_listen(fixture->channel, "127.0.0.1", 0, factory, &error);
   assert_non_null(fixture->server);
 
@@ -208,12 +234,38 @@ static void test_hub_lite_stays_on_v0(void **state) {
   assert_int_equal(hub_service_keychain_hub_key(hub_service_address(fixture->service), key, sizeof(key)), -1);
 }
 
+static void test_handlers_see_the_caller(void **state) {
+  fixture_t *fixture = *state;
+  char *error = NULL;
+  char *reply = NULL;
+
+  start_hub(fixture, 0);
+  hub_service_post(fixture->service, "who", who_handler, NULL);
+  assert_int_equal(hub_service_start(fixture->service, &error), 0);
+  pump(fixture, 1, 2000);
+  assert_non_null(hub_sender);
+
+  assert_int_equal(channel_c_sender_send(hub_sender, "who", NULL,
+                                         "{\"hub\":{\"caller\":{\"key\":\"K\",\"device\":{\"id\":\"d\",\"name\":\"Mac "
+                                         "Studio\"},\"groups\":[\"owners\"],\"owner\":true},\"hubKey\":\"" HUB_KEY "\"}}",
+                                         &reply, &error),
+                   0);
+  assert_string_equal(reply, "\"K|Mac Studio|1\"");
+  channel_c_free(reply);
+
+  /* a call without hub context has no caller */
+  assert_int_equal(channel_c_sender_send(hub_sender, "who", NULL, NULL, &reply, &error), 0);
+  assert_string_equal(reply, "null");
+  channel_c_free(reply);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test_setup_teardown(test_learns_and_pins_the_hub_key, setup, teardown),
       cmocka_unit_test_setup_teardown(test_headers_follow_the_pin, setup, teardown),
       cmocka_unit_test_setup_teardown(test_pinned_hub_connects_once, setup, teardown),
       cmocka_unit_test_setup_teardown(test_hub_lite_stays_on_v0, setup, teardown),
+      cmocka_unit_test_setup_teardown(test_handlers_see_the_caller, setup, teardown),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }
