@@ -1,5 +1,6 @@
 /*
- * hub-pro auth keychain — ed25519 load-or-generate + token signing.
+ * hub-pro auth keychain: ed25519 load-or-generate, token signing and hub key
+ * pins (Docs/Devices/protocol.md section 2).
  *
  * Key file layout (TS hub-service/keychain.ts parity):
  *   base64( 48-byte PKCS8 DER private key || 44-byte SPKI DER public key )
@@ -8,16 +9,14 @@
 
 #include "hub-service-c/keychain.h"
 
-#include <openssl/evp.h>
-#include <openssl/pem.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
-#define PRIVATE_DER_LENGTH 48
-#define PUBLIC_DER_LENGTH 44
-#define KEY_BYTES (PRIVATE_DER_LENGTH + PUBLIC_DER_LENGTH)
+#include <yyjson.h>
+
+#include "crypto.h"
 
 static char key_path_override[1024] = {0};
 
@@ -37,122 +36,52 @@ static const char *key_path(void) {
   return "auth";
 }
 
-static int b64_encode(const unsigned char *data, size_t len, char *out, size_t out_size) {
-  size_t n = 4 * ((len + 2) / 3);
-  unsigned char *tmp;
-  if (n + 1 > out_size) return -1;
-  tmp = (unsigned char *)out;
-  if (!EVP_EncodeBlock(tmp, data, (int)len)) return -1;
-  out[n] = '\0';
-  return 0;
-}
-
-static int b64_decode(const char *in, unsigned char *out, size_t out_size, size_t *decoded) {
-  size_t in_len = strlen(in);
-  size_t max = (in_len / 4) * 3 + 3; /* EVP_DecodeBlock ignores padding */
-  unsigned char *tmp;
-  int n;
-  tmp = (unsigned char *)malloc(max);
-  if (!tmp) return -1;
-  n = EVP_DecodeBlock(tmp, (const unsigned char *)in, (int)in_len);
-  if (n < 0) {
-    free(tmp);
-    return -1;
-  }
-  /* EVP_DecodeBlock ignores padding; compute the real length. */
-  if (in_len > 0 && in[in_len - 1] == '=') n--;
-  if (in_len > 1 && in[in_len - 2] == '=') n--;
-  if ((size_t)n > out_size) {
-    free(tmp);
-    return -1;
-  }
-  memcpy(out, tmp, (size_t)n);
-  *decoded = (size_t)n;
-  free(tmp);
-  return 0;
-}
-
-/* Load the key file into key_bytes (92 bytes); generate + write if missing. */
 static int load_or_generate(unsigned char *key_bytes) {
-  const char *path = key_path();
-  FILE *f = fopen(path, "rb");
-  char text[256];
-  size_t n = 0;
-
-  if (f) {
-    n = fread(text, 1, sizeof(text) - 1, f);
-    fclose(f);
-    text[n] = '\0';
-    /* trim trailing whitespace */
-    while (n > 0 && (text[n - 1] == '\n' || text[n - 1] == '\r' || text[n - 1] == ' ')) {
-      text[--n] = '\0';
-    }
-    size_t decoded = 0;
-    if (b64_decode(text, key_bytes, KEY_BYTES, &decoded) != 0 || decoded != KEY_BYTES) {
-      return -1;
-    }
-    return 0;
-  }
-
-  /* Generate a fresh ed25519 key pair. */
-  EVP_PKEY *pkey = EVP_PKEY_Q_keygen(NULL, NULL, "ED25519");
-  if (!pkey) return -1;
-
-  unsigned char *priv_der = NULL;
-  unsigned char *pub_der = NULL;
-  int priv_len = i2d_PrivateKey(pkey, &priv_der); /* PKCS8 DER */
-  int pub_len = i2d_PUBKEY(pkey, &pub_der);       /* SPKI DER */
-  if (priv_len != PRIVATE_DER_LENGTH || pub_len != PUBLIC_DER_LENGTH || !priv_der || !pub_der) {
-    OPENSSL_free(priv_der);
-    OPENSSL_free(pub_der);
-    EVP_PKEY_free(pkey);
-    return -1;
-  }
-
-  unsigned char raw[KEY_BYTES];
-  memcpy(raw, priv_der, PRIVATE_DER_LENGTH);
-  memcpy(raw + PRIVATE_DER_LENGTH, pub_der, PUBLIC_DER_LENGTH);
-
-  char encoded[256];
-  if (b64_encode(raw, KEY_BYTES, encoded, sizeof(encoded)) != 0) {
-    OPENSSL_free(priv_der);
-    OPENSSL_free(pub_der);
-    EVP_PKEY_free(pkey);
-    return -1;
-  }
-
-  f = fopen(path, "wb");
-  if (!f) {
-    OPENSSL_free(priv_der);
-    OPENSSL_free(pub_der);
-    EVP_PKEY_free(pkey);
-    return -1;
-  }
-  fwrite(encoded, 1, strlen(encoded), f);
-  fclose(f);
-
-  memcpy(key_bytes, raw, KEY_BYTES);
-  OPENSSL_free(priv_der);
-  OPENSSL_free(pub_der);
-  EVP_PKEY_free(pkey);
-  return 0;
-}
-
-static int load_private_key(EVP_PKEY **out_pkey, unsigned char *key_bytes) {
-  const unsigned char *p = key_bytes;
-  EVP_PKEY *pkey = d2i_PrivateKey(EVP_PKEY_ED25519, NULL, &p, PRIVATE_DER_LENGTH);
-  if (!pkey) return -1;
-  *out_pkey = pkey;
-  return 0;
+  return hs_key_file_load(key_path(), 1, 0600, 0, key_bytes);
 }
 
 int hub_service_keychain_public_key(char *out, size_t out_size) {
-  unsigned char key_bytes[KEY_BYTES];
-  if (load_or_generate(key_bytes) != 0) {
+  unsigned char key_bytes[HS_KEY_BYTES];
+  char pub[HS_SPKI_B64_SIZE];
+  if (load_or_generate(key_bytes) != 0 || hs_key_public(key_bytes, pub) != 0 ||
+      snprintf(out, out_size, "%s", pub) >= (int)out_size) {
     out[0] = '\0';
     return -1;
   }
-  if (b64_encode(key_bytes + PRIVATE_DER_LENGTH, PUBLIC_DER_LENGTH, out, out_size) != 0) {
+  return 0;
+}
+
+static int token_from_key(const unsigned char *key_bytes, const char *hub_key, long long expiry,
+                          char *out, size_t out_size) {
+  char data[256];
+  char pub[HS_SPKI_B64_SIZE];
+  char sig[HS_SIG_B64_SIZE];
+
+  if (hub_key) {
+    if (snprintf(data, sizeof(data), "hub1:%s:%lld", hub_key, expiry) >= (int)sizeof(data)) return -1;
+  } else {
+    snprintf(data, sizeof(data), "%lld", expiry);
+  }
+  if (hs_key_sign(key_bytes, data, strlen(data), sig) != 0) return -1;
+  if (hs_key_public(key_bytes, pub) != 0) return -1;
+  if (snprintf(out, out_size, "key.%s.%s.%lld", pub, sig, expiry) >= (int)out_size) return -1;
+  return 0;
+}
+
+int hub_service_auth_token(const char *key_file, const char *hub_key, long long expiry, char *out, size_t out_size) {
+  unsigned char key_bytes[HS_KEY_BYTES];
+  if (!key_file || hs_key_parse(key_file, key_bytes) != 0 ||
+      token_from_key(key_bytes, hub_key, expiry, out, out_size) != 0) {
+    out[0] = '\0';
+    return -1;
+  }
+  return 0;
+}
+
+int hub_service_keychain_sign_for_hub(const char *hub_key, char *out, size_t out_size) {
+  unsigned char key_bytes[HS_KEY_BYTES];
+  long long expiry = (long long)time(NULL) + HUB_SERVICE_AUTH_EXPIRY;
+  if (load_or_generate(key_bytes) != 0 || token_from_key(key_bytes, hub_key, expiry, out, out_size) != 0) {
     out[0] = '\0';
     return -1;
   }
@@ -160,39 +89,7 @@ int hub_service_keychain_public_key(char *out, size_t out_size) {
 }
 
 int hub_service_keychain_sign(char *out, size_t out_size) {
-  unsigned char key_bytes[KEY_BYTES];
-  EVP_PKEY *pkey = NULL;
-  EVP_MD_CTX *mdctx = NULL;
-  unsigned char sig[64];
-  size_t sig_len = sizeof(sig);
-  char expiry[24];
-  char pub_b64[128];
-  char sig_b64[128];
-  int ok = -1;
-
-  if (load_or_generate(key_bytes) != 0) goto done;
-  if (load_private_key(&pkey, key_bytes) != 0) goto done;
-
-  long long now = (long long)time(NULL) + 10;
-  snprintf(expiry, sizeof(expiry), "%lld", now);
-
-  mdctx = EVP_MD_CTX_new();
-  if (!mdctx) goto done;
-  if (EVP_DigestSignInit(mdctx, NULL, NULL, NULL, pkey) != 1) goto done;
-  if (EVP_DigestSign(mdctx, sig, &sig_len, (const unsigned char *)expiry, strlen(expiry)) != 1) goto done;
-  if (sig_len != 64) goto done;
-
-  if (b64_encode(key_bytes + PRIVATE_DER_LENGTH, PUBLIC_DER_LENGTH, pub_b64, sizeof(pub_b64)) != 0) goto done;
-  if (b64_encode(sig, sig_len, sig_b64, sizeof(sig_b64)) != 0) goto done;
-
-  if (snprintf(out, out_size, "key.%s.%s.%s", pub_b64, sig_b64, expiry) >= (int)out_size) goto done;
-  ok = 0;
-
-done:
-  EVP_MD_CTX_free(mdctx);
-  EVP_PKEY_free(pkey);
-  if (ok != 0) out[0] = '\0';
-  return ok;
+  return hub_service_keychain_sign_for_hub(NULL, out, out_size);
 }
 
 /* Percent-encode base64 for a query parameter: '+' -> %2B, '/' -> %2F, '=' -> %3D. */
@@ -224,4 +121,97 @@ int hub_service_keychain_auth_query(char *out, size_t out_size) {
     return -1;
   }
   return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* hub key pins: hubs.json beside the key file                         */
+/* ------------------------------------------------------------------ */
+
+static void hubs_path(char *out, size_t out_size) {
+  char dir[1024];
+  hs_dirname(key_path(), dir, sizeof(dir));
+  snprintf(out, out_size, "%s/hubs.json", dir);
+}
+
+/* The pins as a mutable object (empty when the file is missing or corrupt). */
+static yyjson_mut_doc *read_pins(void) {
+  char path[1100];
+  char *text;
+  yyjson_doc *doc = NULL;
+  yyjson_mut_doc *mut;
+
+  hubs_path(path, sizeof(path));
+  text = hs_read_file(path);
+  if (text) {
+    doc = yyjson_read(text, strlen(text), 0);
+    free(text);
+  }
+  if (doc && yyjson_is_obj(yyjson_doc_get_root(doc))) {
+    mut = yyjson_doc_mut_copy(doc, NULL);
+  } else {
+    mut = yyjson_mut_doc_new(NULL);
+    if (mut) yyjson_mut_doc_set_root(mut, yyjson_mut_obj(mut));
+  }
+  yyjson_doc_free(doc);
+  return mut;
+}
+
+static int write_pins(yyjson_mut_doc *doc) {
+  char path[1100];
+  size_t len = 0;
+  char *json = yyjson_mut_write(doc, 0, &len);
+  int result;
+  if (!json) return -1;
+  hubs_path(path, sizeof(path));
+  result = hs_write_atomic(path, json, len, 0600);
+  free(json);
+  return result;
+}
+
+int hub_service_keychain_hub_key(const char *address, char *out, size_t out_size) {
+  yyjson_mut_doc *doc;
+  yyjson_mut_val *value;
+  int result = -1;
+
+  out[0] = '\0';
+  if (!address) return -1;
+  doc = read_pins();
+  if (!doc) return -1;
+  value = yyjson_mut_obj_get(yyjson_mut_doc_get_root(doc), address);
+  if (yyjson_mut_is_str(value) && snprintf(out, out_size, "%s", yyjson_mut_get_str(value)) < (int)out_size) {
+    result = 0;
+  } else {
+    out[0] = '\0';
+  }
+  yyjson_mut_doc_free(doc);
+  return result;
+}
+
+int hub_service_keychain_pin_hub_key(const char *address, const char *hub_key) {
+  yyjson_mut_doc *doc;
+  yyjson_mut_val *root;
+  int result;
+
+  if (!address || !hub_key) return -1;
+  doc = read_pins();
+  if (!doc) return -1;
+  root = yyjson_mut_doc_get_root(doc);
+  yyjson_mut_obj_remove_key(root, address);
+  yyjson_mut_obj_add_strcpy(doc, root, address, hub_key);
+  result = write_pins(doc);
+  yyjson_mut_doc_free(doc);
+  return result;
+}
+
+int hub_service_keychain_forget_hub_key(const char *address) {
+  yyjson_mut_doc *doc;
+  int result;
+
+  if (!address) return -1;
+  doc = read_pins();
+  if (!doc) return -1;
+  yyjson_mut_obj_remove_key(yyjson_mut_doc_get_root(doc), address);
+  result = write_pins(doc);
+  yyjson_mut_doc_free(doc);
+  return result;
 }

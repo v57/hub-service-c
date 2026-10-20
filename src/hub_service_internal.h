@@ -17,4 +17,16 @@ char *hub_service_build_profile_json(const hub_service_t *service);
 /* AppInterface JSON: {"header":{...},"body":[...],"top":null,"bottom":null,"data":{}} */
 char *hub_service_build_app_interface_json(const hub_service_app_t *app);
 
+/* Handshake headers for the next connect: auth (v1 when a hub key is pinned
+ * for the address, else v0) and v. items point into the struct. */
+typedef struct {
+  char auth[512];
+  char v[2];
+  channel_c_header_t items[3];
+  size_t count;
+} hub_service_connect_headers_t;
+
+int hub_service_build_connect_headers(hub_service_t *service, hub_service_connect_headers_t *out);
+void hub_service_connect_headers_free(hub_service_connect_headers_t *headers);
+
 #endif /* HUB_SERVICE_C_INTERNAL_H */

@@ -2,15 +2,21 @@
  * hub_service_c: lite C port of hub-service (TS reference).
  *
  * Registers post/stream API endpoints and hub apps on a hub (hub-lite/hub-pro)
- * and calls API through the hub. No crypto, no auth, no keychain.
+ * and calls API through the hub, authenticated with the keychain `auth` key.
  *
  * The channel-c client runs on a poll loop: call hub_service_start once, then
  * hub_service_poll in a loop. On every 0->1 is_connected transition the
  * service re-sends hub/profile/update (if a profile is set) and
  * hub/service/update (hub-lite drops services on disconnect).
+ *
+ * Auth (Docs/Devices/protocol.md section 2): with no hub key pinned for the
+ * address the service connects with v0, asks hub/info for the hub key, pins
+ * it in hubs.json and reconnects with a v1 token bound to that hub. hub-lite
+ * answers hub/info with an error, so the service stays on v0 there.
  */
 
 #include <stdarg.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,6 +25,7 @@
 
 #include "hub-service-c/hub_service_c.h"
 #include "hub-service-c/keychain.h"
+#include "hub_service_internal.h"
 
 /* ------------------------------------------------------------------ */
 /* dynamic string buffer for JSON building                             */
@@ -187,6 +194,8 @@ struct hub_service {
   char **app_interfaces; /* prebuilt AppInterface JSON per app (parallel) */
 
   int was_connected;
+  int started;       /* between hub_service_start and hub_service_stop */
+  int hub_key_known; /* the current connection used a pinned hub key (v1) */
 };
 
 static int service_add_path(hub_service_t *service, const char *path, const hub_service_settings_t *settings);
@@ -470,6 +479,10 @@ void hub_service_free(hub_service_t *service) {
   free(service);
 }
 
+const char *hub_service_address(const hub_service_t *service) {
+  return service ? service->address : NULL;
+}
+
 int hub_service_set_name(hub_service_t *service, const char *name) {
   char *copy;
 
@@ -655,6 +668,74 @@ static void service_send_updates(hub_service_t *service) {
   }
 }
 
+int hub_service_build_connect_headers(hub_service_t *service, hub_service_connect_headers_t *out) {
+  char hub_key[128];
+
+  memset(out, 0, sizeof(*out));
+  service->hub_key_known = hub_service_keychain_hub_key(service->address, hub_key, sizeof(hub_key)) == 0;
+  if (hub_service_keychain_sign_for_hub(service->hub_key_known ? hub_key : NULL, out->auth, sizeof(out->auth)) != 0) {
+    return -1;
+  }
+  snprintf(out->v, sizeof(out->v), "%s", service->hub_key_known ? "1" : "0");
+  out->items[0].name = "auth";
+  out->items[0].value = out->auth;
+  out->items[1].name = "v";
+  out->items[1].value = out->v;
+  out->count = 2;
+  return 0;
+}
+
+void hub_service_connect_headers_free(hub_service_connect_headers_t *headers) {
+  (void)headers;
+}
+
+/* Dial the hub with fresh handshake headers: a v1 token when a hub key is
+ * pinned for the address, else v0. Headers are rebuilt on every (re)connect
+ * since the token embeds an expiry. */
+static int service_connect(hub_service_t *service, char **out_error) {
+  hub_service_connect_headers_t headers;
+  channel_c_client_options_t client_options;
+
+  /* hub-pro auth: send a freshly signed token as handshake headers (as TS does), not as URL query
+     params, so it never ends up in proxy or access logs. */
+  if (hub_service_build_connect_headers(service, &headers) != 0) {
+    if (out_error) *out_error = channel_c_strdup("keychain failed");
+    return -1;
+  }
+  memset(&client_options, 0, sizeof(client_options));
+  client_options.headers = headers.items;
+  client_options.header_count = headers.count;
+  service->client = channel_c_client_connect_with_options(service->channel, service->address, &client_options, out_error);
+  hub_service_connect_headers_free(&headers);
+  service->was_connected = 0; /* first poll sees 0->1 and sends updates */
+  return service->client ? 0 : -1;
+}
+
+/* Ask hub/info for the hub key and pin it. Returns 1 when a key was pinned
+ * (the caller reconnects with v1), 0 when the hub has none (hub-lite). */
+static int service_learn_hub_key(hub_service_t *service) {
+  char *response = NULL;
+  char *error = NULL;
+  yyjson_doc *doc;
+  yyjson_val *key;
+  int pinned = 0;
+
+  if (channel_c_sender_send(channel_c_client_sender(service->client), "hub/info", NULL, NULL, &response, &error) != 0 ||
+      !response) {
+    channel_c_free(response);
+    channel_c_free(error);
+    return 0;
+  }
+  doc = yyjson_read(response, strlen(response), 0);
+  key = yyjson_obj_get(yyjson_doc_get_root(doc), "key");
+  if (yyjson_is_str(key) && yyjson_get_len(key) > 0) {
+    pinned = hub_service_keychain_pin_hub_key(service->address, yyjson_get_str(key)) == 0;
+  }
+  yyjson_doc_free(doc);
+  channel_c_free(response);
+  return pinned;
+}
+
 int hub_service_start(hub_service_t *service, char **out_error) {
   if (out_error) *out_error = NULL;
   if (!service) {
@@ -662,30 +743,11 @@ int hub_service_start(hub_service_t *service, char **out_error) {
     return -1;
   }
   if (service->client) return 0; /* already started */
-
-  /* hub-pro auth: send a freshly signed token as handshake headers (as TS does), not as URL query
-     params, so it never ends up in proxy or access logs. */
-  {
-    char token[512];
-    channel_c_header_t headers[2];
-    channel_c_client_options_t client_options;
-
-    if (hub_service_keychain_sign(token, sizeof(token)) != 0) {
-      if (out_error) *out_error = channel_c_strdup("keychain failed");
-      return -1;
-    }
-    headers[0].name = "auth";
-    headers[0].value = token;
-    headers[1].name = "v";
-    headers[1].value = "0";
-    memset(&client_options, 0, sizeof(client_options));
-    client_options.headers = headers;
-    client_options.header_count = 2;
-    service->client = channel_c_client_connect_with_options(service->channel, service->address, &client_options, out_error);
+  service->started = 1;
+  if (service_connect(service, out_error) != 0) {
+    service->started = 0;
+    return -1;
   }
-  if (!service->client) return -1;
-
-  service->was_connected = 0; /* first poll sees 0->1 and sends updates */
   return 0;
 }
 
@@ -693,7 +755,15 @@ int hub_service_poll(hub_service_t *service) {
   int connected;
 
   if (!service) return -1;
-  if (!service->client) return 0; /* stopped */
+  if (!service->started) return 0; /* stopped */
+  if (!service->client) {
+    /* Redial after a drop. channel-c's connect blocks up to ~10 s when the
+     * hub is down, which paces the retries. */
+    char *error = NULL;
+    int result = service_connect(service, &error);
+    channel_c_free(error);
+    if (result != 0) return -1;
+  }
 
   (void)channel_c_client_poll(service->client);
   connected = channel_c_client_is_connected(service->client);
@@ -701,6 +771,13 @@ int hub_service_poll(hub_service_t *service) {
   if (connected && !service->was_connected) {
     /* 0->1 transition (initial connect or reconnect): re-register with the hub */
     service_send_updates(service);
+    if (!service->hub_key_known && service_learn_hub_key(service)) {
+      /* Reconnect at once so the connection uses the hub-bound v1 token. */
+      channel_c_client_free(service->client);
+      service->client = NULL;
+      service->was_connected = 0;
+      return 0;
+    }
   } else if (!connected && service->was_connected) {
     /* 1->0 transition: the channel-c client does not auto-reconnect, so
      * release it; the next poll redials a fresh client (handlers live on the
@@ -715,11 +792,17 @@ int hub_service_poll(hub_service_t *service) {
 
 void hub_service_stop(hub_service_t *service) {
   if (!service) return;
+  service->started = 0;
   if (service->client) {
     channel_c_client_free(service->client);
     service->client = NULL;
   }
   service->was_connected = 0;
+}
+
+int hub_service_forget_hub_key(hub_service_t *service) {
+  if (!service) return -1;
+  return hub_service_keychain_forget_hub_key(service->address);
 }
 
 /* ------------------------------------------------------------------ */

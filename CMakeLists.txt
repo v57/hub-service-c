@@ -46,6 +46,7 @@ endif()
 add_library(hub_service_c STATIC
   src/hub_service_c.c
   src/keychain.c
+  src/crypto.c
 )
 
 target_include_directories(hub_service_c
@@ -59,6 +60,7 @@ target_link_libraries(hub_service_c
   PUBLIC
     channel_c
     PkgConfig::YYJSON
+    OpenSSL::Crypto
 )
 
 # ---------------------------------------------------------------------------
@@ -81,3 +83,15 @@ add_executable(test_keychain tests/test_keychain.c)
 target_include_directories(test_keychain PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(test_keychain PRIVATE hub_service_c PkgConfig::CMOCKA)
 add_test(NAME unit_keychain COMMAND test_keychain)
+
+# Device layer test vectors, shared by every SDK (Hub/Docs/Devices).
+set(HUB_DEVICE_VECTORS "${CMAKE_CURRENT_SOURCE_DIR}/../../Docs/Devices/vectors.json")
+add_executable(test_vectors tests/test_vectors.c)
+target_compile_definitions(test_vectors PRIVATE HUB_DEVICE_VECTORS="${HUB_DEVICE_VECTORS}")
+target_link_libraries(test_vectors PRIVATE hub_service_c PkgConfig::CMOCKA)
+add_test(NAME unit_vectors COMMAND test_vectors)
+
+add_executable(test_hub_flow tests/test_hub_flow.c)
+target_include_directories(test_hub_flow PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_link_libraries(test_hub_flow PRIVATE hub_service_c PkgConfig::CMOCKA)
+add_test(NAME hub_flow COMMAND test_hub_flow)

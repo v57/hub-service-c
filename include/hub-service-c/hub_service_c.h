@@ -12,7 +12,8 @@ extern "C" {
 /*
  * hub_service_c: lite C port of hub-service (TS reference).
  * Registers post/stream API endpoints and hub apps on a hub (hub-lite/hub-pro)
- * and calls API through the hub. No crypto, no auth, no keychain.
+ * and calls API through the hub. Authenticates with the keychain `auth` key
+ * (see keychain.h): v0 until hub/info pins the hub key, then v1.
  */
 
 typedef struct hub_service hub_service_t;
@@ -78,6 +79,9 @@ hub_service_t *hub_service_new(const hub_service_options_t *options, char **out_
 /* Free a service and all its resources. */
 void hub_service_free(hub_service_t *service);
 
+/* The ws:// URL the service dials (also the key of its hub key pin). */
+const char *hub_service_address(const hub_service_t *service);
+
 /* Update the profile (applied on the next connect/reconnect). */
 int hub_service_set_name(hub_service_t *service, const char *name);
 int hub_service_set_icon(hub_service_t *service, const char *icon_json);
@@ -119,11 +123,22 @@ int hub_service_start(hub_service_t *service, char **out_error);
  * Drive the client: polls the websocket, detects connect/disconnect
  * transitions, re-sends profile+service updates on every (re)connect, and
  * redials when the connection drops. Call in a loop (see example/echo.c).
+ * On the first connection to a hub with no pinned key it calls hub/info,
+ * pins the key and reconnects with a hub-bound (v1) token.
+ * Returns -1 when a redial failed (the next poll tries again).
  */
 int hub_service_poll(hub_service_t *service);
 
-/* Stop and release the current client connection (poll will reconnect). */
+/* Stop and release the current client connection (poll stays idle until
+ * hub_service_start is called again). */
 void hub_service_stop(hub_service_t *service);
+
+/*
+ * Forget the hub key pinned for this service's address. Use it when a v1
+ * connect keeps failing with "invalid signature" because the hub's key
+ * changed on purpose; the next connect learns it again.
+ */
+int hub_service_forget_hub_key(hub_service_t *service);
 
 /* Call an API through the hub. Errors if the service is not started. */
 int hub_service_send(hub_service_t *service, const char *path, const char *body_json,

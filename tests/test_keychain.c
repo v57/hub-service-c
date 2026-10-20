@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <setjmp.h>
@@ -112,6 +113,49 @@ static void test_auth_query_shape(void **state) {
   assert_true(strstr(query, "=") == NULL || strstr(query, "%3D") != NULL);
 }
 
+static void test_hub_key_pins(void **state) {
+  (void)state;
+  char key[128];
+  char path[400];
+  assert_int_equal(hub_service_keychain_hub_key("ws://127.0.0.1:1997", key, sizeof(key)), -1);
+  assert_string_equal(key, "");
+
+  assert_int_equal(hub_service_keychain_pin_hub_key("ws://127.0.0.1:1997", "HUBKEY1"), 0);
+  assert_int_equal(hub_service_keychain_pin_hub_key("ws://example:1997", "HUBKEY2"), 0);
+  assert_int_equal(hub_service_keychain_hub_key("ws://127.0.0.1:1997", key, sizeof(key)), 0);
+  assert_string_equal(key, "HUBKEY1");
+
+  /* stored beside the key file */
+  snprintf(path, sizeof(path), "%s/hubs.json", test_dir);
+  assert_int_equal(access(path, F_OK), 0);
+
+  assert_int_equal(hub_service_keychain_forget_hub_key("ws://127.0.0.1:1997"), 0);
+  assert_int_equal(hub_service_keychain_hub_key("ws://127.0.0.1:1997", key, sizeof(key)), -1);
+  assert_int_equal(hub_service_keychain_hub_key("ws://example:1997", key, sizeof(key)), 0);
+  assert_string_equal(key, "HUBKEY2");
+}
+
+static void test_sign_for_hub_binds_the_hub_key(void **state) {
+  (void)state;
+  FILE *f = fopen(test_auth_path, "wb");
+  assert_non_null(f);
+  fputs(TS_TEST_AUTH, f);
+  fclose(f);
+
+  char token[512];
+  char expected[512];
+  assert_int_equal(hub_service_keychain_sign_for_hub("HUBKEY", token, sizeof(token)), 0);
+  const char *expiry = strrchr(token, '.') + 1;
+  long long value = atoll(expiry);
+  long long now = (long long)time(NULL);
+  assert_true(value >= now + HUB_SERVICE_AUTH_EXPIRY - 2 && value <= now + HUB_SERVICE_AUTH_EXPIRY);
+  assert_int_equal(hub_service_auth_token(TS_TEST_AUTH, "HUBKEY", value, expected, sizeof(expected)), 0);
+  assert_string_equal(token, expected);
+  /* a v0 token for the same expiry has another signature */
+  assert_int_equal(hub_service_auth_token(TS_TEST_AUTH, NULL, value, expected, sizeof(expected)), 0);
+  assert_string_not_equal(token, expected);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test_setup_teardown(test_sign_token_shape, setup_test, teardown_test),
@@ -119,6 +163,8 @@ int main(void) {
       cmocka_unit_test_setup_teardown(test_ts_generated_key_reproduces_public_key, setup_test,
                                       teardown_test),
       cmocka_unit_test_setup_teardown(test_auth_query_shape, setup_test, teardown_test),
+      cmocka_unit_test_setup_teardown(test_hub_key_pins, setup_test, teardown_test),
+      cmocka_unit_test_setup_teardown(test_sign_for_hub_binds_the_hub_key, setup_test, teardown_test),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }
