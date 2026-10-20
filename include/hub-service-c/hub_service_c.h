@@ -29,15 +29,20 @@ typedef struct {
   /* Profile icon as a JSON fragment (optional): "{"symbol":..,"text":..}" or "\"symbol\"". */
   const char *icon;
   /* Instance name in the device certificate, unique per device
-   * ("s3-local/Backup Disk"). NULL -> name, else the first segment of the
-   * first registered path, else "service". */
+   * ("s3-local/Backup Disk"). NULL -> $HUB_INSTANCE, else name, else the
+   * basename of the working directory, else "service". */
   const char *instance;
-  /* Suggested device name in the certificate. NULL -> the host name. */
+  /* Suggested device name in the certificate. NULL -> $HUB_DEVICE_NAME, else
+   * the macOS computer name, else the host name. */
   const char *device_name;
-  /* Declared parent device name, for containers and VMs (optional). */
+  /* Declared parent device name, for containers and VMs. NULL -> $HUB_DEVICE_PARENT. */
   const char *parent;
-  /* Non-zero: no device key and no `device` header (a plain key connection). */
+  /* Non-zero: no device key and no `device` header (a plain key connection).
+   * $HUB_DEVICE=0 (or off, false, no) does the same. */
   int disable_device;
+  /* A caller-provided device key (key file text) used instead of the device
+   * key file, for apps that keep it in their own store. NULL -> the file. */
+  const char *device_key;
 } hub_service_options_t;
 
 /* Per-path settings for the hub/service/update payload (pro-only wire parity;
@@ -115,8 +120,19 @@ hub_service_t *hub_service_new(const hub_service_options_t *options, char **out_
 /* Free a service and all its resources. */
 void hub_service_free(hub_service_t *service);
 
-/* The ws:// URL the service dials (also the key of its hub key pin). */
+/* The ws:// URL the service dials. */
 const char *hub_service_address(const hub_service_t *service);
+
+/* The key of this service's hub key pin: the configured address normalized
+ * (see hub_service_normalize_address). */
+const char *hub_service_pin_address(const hub_service_t *service);
+
+/*
+ * A hub address normalized for hub key pins (protocol.md section 2): a bare
+ * port "1997" becomes "ws://localhost:1997"; otherwise the URL as given with
+ * the scheme and host lowercased and no trailing slash. malloc'd.
+ */
+char *hub_service_normalize_address(const char *address);
 
 /* Update the profile (applied on the next connect/reconnect). */
 int hub_service_set_name(hub_service_t *service, const char *name);

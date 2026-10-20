@@ -65,16 +65,29 @@ int hub_service_device_safety_code(const char *spki, char *out, size_t out_size)
 /* This OS as a certificate platform: macos, ios, linux, windows, android or other. */
 const char *hub_service_device_platform(void);
 
-/* The host name without a trailing ".local" (the default device name). */
+/* The host name without a trailing ".local". */
 int hub_service_device_host_name(char *out, size_t out_size);
+
+/* The default device name: $HUB_DEVICE_NAME, else the macOS computer name,
+ * else the host name. */
+int hub_service_device_default_name(char *out, size_t out_size);
+
+/* 0 when $HUB_DEVICE turns device mode off (0, off, false, no). */
+int hub_service_device_mode_enabled(void);
 
 /*
  * A certificate for service_key signed by the device key file (created when
  * missing), issued at now for HUB_SERVICE_CERTIFICATE_LIFETIME. device_name
- * NULL -> host name; parent may be NULL.
+ * NULL -> hub_service_device_default_name; parent NULL -> $HUB_DEVICE_PARENT.
  */
 char *hub_service_device_certificate(const char *service_key, const char *instance, const char *device_name,
                                      const char *parent, long long now);
+
+/* The same, signed with a caller-provided device key (key file text), for
+ * apps that keep the device key in their own store. */
+char *hub_service_device_certificate_with_key(const char *device_key_file, const char *service_key,
+                                              const char *instance, const char *device_name, const char *parent,
+                                              long long now);
 
 #ifdef __cplusplus
 }

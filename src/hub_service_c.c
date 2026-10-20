@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include <yyjson.h>
 
@@ -183,6 +184,8 @@ struct hub_service {
   channel_c_channel_t *channel;
   channel_c_client_t *client;
   char *address; /* ws:// URL */
+  char *pin_address; /* normalized configured address, the hub key pin's key */
+  char *device_key;  /* caller-provided device key file text or NULL */
   char *name;    /* profile name or NULL */
   char *icon;    /* icon JSON fragment or NULL */
 
@@ -441,7 +444,14 @@ hub_service_t *hub_service_new(const hub_service_options_t *options, char **out_
     address = "ws://127.0.0.1:1997";
   }
   service->address = channel_c_strdup(address);
-  if (!service->address) {
+  if (options && options->address) {
+    service->pin_address = hub_service_normalize_address(options->address);
+  } else if (getenv("HUB") && getenv("HUB")[0]) {
+    service->pin_address = hub_service_normalize_address(getenv("HUB"));
+  } else {
+    service->pin_address = hub_service_normalize_address("1997");
+  }
+  if (!service->address || !service->pin_address) {
     hub_service_free(service);
     if (out_error) *out_error = channel_c_strdup("internal error");
     return NULL;
@@ -451,7 +461,8 @@ hub_service_t *hub_service_new(const hub_service_options_t *options, char **out_
   if (options && options->instance) service->instance = channel_c_strdup(options->instance);
   if (options && options->device_name) service->device_name = channel_c_strdup(options->device_name);
   if (options && options->parent) service->parent = channel_c_strdup(options->parent);
-  if (options) service->disable_device = options->disable_device;
+  if (options && options->device_key) service->device_key = channel_c_strdup(options->device_key);
+  service->disable_device = (options && options->disable_device) || !hub_service_device_mode_enabled();
 
   service->channel = channel_c_channel_new();
   if (!service->channel) {
@@ -470,6 +481,11 @@ void hub_service_free(hub_service_t *service) {
   if (service->channel) channel_c_channel_free(service->channel);
 
   free(service->address);
+  free(service->pin_address);
+  if (service->device_key) {
+    memset(service->device_key, 0, strlen(service->device_key));
+    free(service->device_key);
+  }
   free(service->name);
   free(service->icon);
   free(service->instance);
@@ -498,6 +514,41 @@ void hub_service_free(hub_service_t *service) {
 
 const char *hub_service_address(const hub_service_t *service) {
   return service ? service->address : NULL;
+}
+
+const char *hub_service_pin_address(const hub_service_t *service) {
+  return service ? service->pin_address : NULL;
+}
+
+char *hub_service_normalize_address(const char *address) {
+  const char *p;
+  const char *scheme_end;
+  const char *authority_end;
+  char *out;
+  size_t n;
+  size_t i;
+
+  if (!address) return NULL;
+  for (p = address; *p >= '0' && *p <= '9'; p++) {
+  }
+  if (p != address && *p == '\0') {
+    n = strlen(address) + sizeof("ws://localhost:");
+    out = (char *)malloc(n);
+    if (out) snprintf(out, n, "ws://localhost:%s", address);
+    return out;
+  }
+  out = channel_c_strdup(address);
+  if (!out) return NULL;
+  n = strlen(out);
+  while (n > 0 && out[n - 1] == '/') out[--n] = '\0';
+  scheme_end = strstr(out, "://");
+  if (scheme_end) {
+    authority_end = scheme_end + 3 + strcspn(scheme_end + 3, "/?#");
+    for (i = 0; out + i < authority_end; i++) {
+      if (out[i] >= 'A' && out[i] <= 'Z') out[i] = (char)(out[i] - 'A' + 'a');
+    }
+  }
+  return out;
 }
 
 int hub_service_set_name(hub_service_t *service, const char *name) {
@@ -685,22 +736,18 @@ static void service_send_updates(hub_service_t *service) {
   }
 }
 
-/* The certificate instance: the option, else the profile name, else the
- * first segment of the first registered path, else "service". */
+/* The certificate instance: the option, else $HUB_INSTANCE, else the profile
+ * name, else the basename of the working directory, else "service". */
 static char *service_instance(const hub_service_t *service) {
+  const char *env = getenv("HUB_INSTANCE");
+  char cwd[1024];
   const char *slash;
-  char *segment;
   if (service->instance && service->instance[0]) return channel_c_strdup(service->instance);
+  if (env && env[0]) return channel_c_strdup(env);
   if (service->name && service->name[0]) return channel_c_strdup(service->name);
-  if (service->paths_count > 0 && service->paths[0].path[0]) {
-    slash = strchr(service->paths[0].path, '/');
-    if (!slash) return channel_c_strdup(service->paths[0].path);
-    segment = (char *)malloc((size_t)(slash - service->paths[0].path) + 1);
-    if (segment) {
-      memcpy(segment, service->paths[0].path, (size_t)(slash - service->paths[0].path));
-      segment[slash - service->paths[0].path] = '\0';
-    }
-    return segment;
+  if (getcwd(cwd, sizeof(cwd))) {
+    slash = strrchr(cwd, '/');
+    if (slash && slash[1]) return channel_c_strdup(slash + 1);
   }
   return channel_c_strdup("service");
 }
@@ -718,7 +765,10 @@ const char *hub_service_current_certificate(hub_service_t *service, long long no
   instance = service_instance(service);
   if (!instance) return service->certificate;
   /* A device key that can't be read or created leaves a plain key connection. */
-  certificate = hub_service_device_certificate(service_key, instance, service->device_name, service->parent, now);
+  certificate = service->device_key
+                    ? hub_service_device_certificate_with_key(service->device_key, service_key, instance,
+                                                              service->device_name, service->parent, now)
+                    : hub_service_device_certificate(service_key, instance, service->device_name, service->parent, now);
   free(instance);
   if (!certificate) return NULL;
   free(service->certificate);
@@ -732,7 +782,7 @@ int hub_service_build_connect_headers(hub_service_t *service, hub_service_connec
   const char *certificate;
 
   memset(out, 0, sizeof(*out));
-  service->hub_key_known = hub_service_keychain_hub_key(service->address, hub_key, sizeof(hub_key)) == 0;
+  service->hub_key_known = hub_service_keychain_hub_key(service->pin_address, hub_key, sizeof(hub_key)) == 0;
   if (hub_service_keychain_sign_for_hub(service->hub_key_known ? hub_key : NULL, out->auth, sizeof(out->auth)) != 0) {
     return -1;
   }
@@ -795,7 +845,7 @@ static int service_learn_hub_key(hub_service_t *service) {
   doc = yyjson_read(response, strlen(response), 0);
   key = yyjson_obj_get(yyjson_doc_get_root(doc), "key");
   if (yyjson_is_str(key) && yyjson_get_len(key) > 0) {
-    pinned = hub_service_keychain_pin_hub_key(service->address, yyjson_get_str(key)) == 0;
+    pinned = hub_service_keychain_pin_hub_key(service->pin_address, yyjson_get_str(key)) == 0;
   }
   yyjson_doc_free(doc);
   channel_c_free(response);
@@ -868,7 +918,7 @@ void hub_service_stop(hub_service_t *service) {
 
 int hub_service_forget_hub_key(hub_service_t *service) {
   if (!service) return -1;
-  return hub_service_keychain_forget_hub_key(service->address);
+  return hub_service_keychain_forget_hub_key(service->pin_address);
 }
 
 /* ------------------------------------------------------------------ */

@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 
 #include <yyjson.h>
@@ -121,6 +122,48 @@ const char *hub_service_device_platform(void) {
 #endif
 }
 
+int hub_service_device_mode_enabled(void) {
+  const char *value = getenv("HUB_DEVICE");
+  if (!value) return 1;
+  return !(strcasecmp(value, "0") == 0 || strcasecmp(value, "off") == 0 || strcasecmp(value, "false") == 0 ||
+           strcasecmp(value, "no") == 0);
+}
+
+/* macOS computer name (scutil --get ComputerName), cached; "" elsewhere. */
+static const char *computer_name(void) {
+  static int loaded = 0;
+  static char name[256];
+  if (!loaded) {
+    loaded = 1;
+    name[0] = '\0';
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
+    {
+      FILE *pipe = popen("scutil --get ComputerName 2>/dev/null", "r");
+      if (pipe) {
+        size_t n = fread(name, 1, sizeof(name) - 1, pipe);
+        name[n] = '\0';
+        while (n > 0 && (name[n - 1] == '\n' || name[n - 1] == '\r' || name[n - 1] == ' ')) name[--n] = '\0';
+        if (pclose(pipe) != 0) name[0] = '\0';
+      }
+    }
+#endif
+  }
+  return name;
+}
+
+int hub_service_device_default_name(char *out, size_t out_size) {
+  const char *env = getenv("HUB_DEVICE_NAME");
+  if (env && env[0]) {
+    snprintf(out, out_size, "%s", env);
+    return 0;
+  }
+  if (computer_name()[0]) {
+    snprintf(out, out_size, "%s", computer_name());
+    return 0;
+  }
+  return hub_service_device_host_name(out, out_size);
+}
+
 int hub_service_device_host_name(char *out, size_t out_size) {
   size_t n;
   if (gethostname(out, out_size) != 0) {
@@ -200,20 +243,20 @@ static void truncate_utf8(char *text, size_t max) {
   text[n] = '\0';
 }
 
-char *hub_service_device_certificate(const char *service_key, const char *instance, const char *device_name,
-                                     const char *parent, long long now) {
-  unsigned char key[HS_KEY_BYTES];
+static char *issue_certificate(const unsigned char key[HS_KEY_BYTES], const char *service_key, const char *instance,
+                               const char *device_name, const char *parent, long long now) {
   hub_service_certificate_t certificate;
   char instance_buf[129];
   char name_buf[256];
   char parent_buf[65];
 
-  if (!service_key || !instance || !instance[0] || load_device_key(key) != 0) return NULL;
+  if (!service_key || !instance || !instance[0]) return NULL;
+  if (!parent) parent = getenv("HUB_DEVICE_PARENT");
   snprintf(instance_buf, sizeof(instance_buf), "%s", instance);
   truncate_utf8(instance_buf, 128);
   if (device_name) {
     snprintf(name_buf, sizeof(name_buf), "%s", device_name);
-  } else if (hub_service_device_host_name(name_buf, sizeof(name_buf)) != 0) {
+  } else if (hub_service_device_default_name(name_buf, sizeof(name_buf)) != 0) {
     name_buf[0] = '\0';
   }
   truncate_utf8(name_buf, 64);
@@ -231,4 +274,19 @@ char *hub_service_device_certificate(const char *service_key, const char *instan
   certificate.iat = now;
   certificate.exp = now + HUB_SERVICE_CERTIFICATE_LIFETIME;
   return encode_with_key(key, &certificate);
+}
+
+char *hub_service_device_certificate(const char *service_key, const char *instance, const char *device_name,
+                                     const char *parent, long long now) {
+  unsigned char key[HS_KEY_BYTES];
+  if (load_device_key(key) != 0) return NULL;
+  return issue_certificate(key, service_key, instance, device_name, parent, now);
+}
+
+char *hub_service_device_certificate_with_key(const char *device_key_file, const char *service_key,
+                                              const char *instance, const char *device_name, const char *parent,
+                                              long long now) {
+  unsigned char key[HS_KEY_BYTES];
+  if (!device_key_file || hs_key_parse(device_key_file, key) != 0) return NULL;
+  return issue_certificate(key, service_key, instance, device_name, parent, now);
 }

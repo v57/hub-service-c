@@ -170,7 +170,7 @@ static void test_learns_and_pins_the_hub_key(void **state) {
 
   /* v0 connect, hub/info, pin, reconnect */
   assert_int_equal(connect_count, 2);
-  assert_int_equal(hub_service_keychain_hub_key(hub_service_address(fixture->service), key, sizeof(key)), 0);
+  assert_int_equal(hub_service_keychain_hub_key(hub_service_pin_address(fixture->service), key, sizeof(key)), 0);
   assert_string_equal(key, HUB_KEY);
 }
 
@@ -194,7 +194,7 @@ static void test_headers_follow_the_pin(void **state) {
   hub_service_connect_headers_free(&headers);
 
   /* pinned: v1 bound to the hub key */
-  assert_int_equal(hub_service_keychain_pin_hub_key(hub_service_address(fixture->service), HUB_KEY), 0);
+  assert_int_equal(hub_service_keychain_pin_hub_key(hub_service_pin_address(fixture->service), HUB_KEY), 0);
   assert_int_equal(hub_service_build_connect_headers(fixture->service, &headers), 0);
   assert_string_equal(headers.items[1].value, "1");
   expiry = atoll(strrchr(headers.auth, '.') + 1);
@@ -214,7 +214,7 @@ static void test_pinned_hub_connects_once(void **state) {
   char *error = NULL;
 
   start_hub(fixture, 1);
-  assert_int_equal(hub_service_keychain_pin_hub_key(hub_service_address(fixture->service), HUB_KEY), 0);
+  assert_int_equal(hub_service_keychain_pin_hub_key(hub_service_pin_address(fixture->service), HUB_KEY), 0);
   assert_int_equal(hub_service_start(fixture->service, &error), 0);
   pump(fixture, 2, 300);
 
@@ -231,7 +231,7 @@ static void test_hub_lite_stays_on_v0(void **state) {
   pump(fixture, 2, 300);
 
   assert_int_equal(connect_count, 1);
-  assert_int_equal(hub_service_keychain_hub_key(hub_service_address(fixture->service), key, sizeof(key)), -1);
+  assert_int_equal(hub_service_keychain_hub_key(hub_service_pin_address(fixture->service), key, sizeof(key)), -1);
 }
 
 static void test_handlers_see_the_caller(void **state) {

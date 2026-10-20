@@ -159,21 +159,113 @@ static void test_instance_defaults(void **state) {
   (void)state;
   hub_service_options_t options;
   hub_service_t *service;
+  char cwd[1024];
+  char saved[1024];
 
-  service = hub_service_new(NULL, NULL);
-  assert_string_equal(instance_of(service), "service");
-  hub_service_free(service);
-
+  /* the basename of the working directory */
+  assert_non_null(getcwd(saved, sizeof(saved)));
+  snprintf(cwd, sizeof(cwd), "%s/s3-local", test_dir);
+  mkdir(cwd, 0700);
+  assert_int_equal(chdir(cwd), 0);
   service = hub_service_new(NULL, NULL);
   hub_service_post(service, "s3/read", noop_handler, NULL);
-  assert_string_equal(instance_of(service), "s3");
+  assert_string_equal(instance_of(service), "s3-local");
   hub_service_free(service);
+  assert_int_equal(chdir(saved), 0);
 
+  /* the profile name */
   memset(&options, 0, sizeof(options));
   options.name = "Backup Disk";
   service = hub_service_new(&options, NULL);
-  hub_service_post(service, "s3/read", noop_handler, NULL);
   assert_string_equal(instance_of(service), "Backup Disk");
+  hub_service_free(service);
+
+  /* $HUB_INSTANCE (the launcher's app name) wins over the name */
+  setenv("HUB_INSTANCE", "launcher-app", 1);
+  service = hub_service_new(&options, NULL);
+  assert_string_equal(instance_of(service), "launcher-app");
+  hub_service_free(service);
+
+  /* the option wins over everything */
+  options.instance = "s3-local/Backup Disk";
+  service = hub_service_new(&options, NULL);
+  assert_string_equal(instance_of(service), "s3-local/Backup Disk");
+  hub_service_free(service);
+  unsetenv("HUB_INSTANCE");
+}
+
+static void test_environment_defaults(void **state) {
+  (void)state;
+  hub_service_options_t options;
+  hub_service_t *service;
+  hub_service_connect_headers_t headers;
+  yyjson_doc *doc;
+
+  setenv("HUB_DEVICE_NAME", "Named", 1);
+  setenv("HUB_DEVICE_PARENT", "Host", 1);
+  service = hub_service_new(NULL, NULL);
+  doc = certificate_payload(hub_service_current_certificate(service, 1792500000));
+  assert_string_equal(yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(doc), "deviceName")), "Named");
+  assert_string_equal(yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(doc), "parent")), "Host");
+  yyjson_doc_free(doc);
+  hub_service_free(service);
+  unsetenv("HUB_DEVICE_NAME");
+  unsetenv("HUB_DEVICE_PARENT");
+
+  /* HUB_DEVICE=off turns device mode off */
+  setenv("HUB_DEVICE", "off", 1);
+  service = hub_service_new(NULL, NULL);
+  assert_int_equal(hub_service_build_connect_headers(service, &headers), 0);
+  assert_int_equal(headers.count, 2);
+  hub_service_free(service);
+  unsetenv("HUB_DEVICE");
+
+  /* a caller-provided device key: no key file is read or created */
+  unlink(device_path);
+  memset(&options, 0, sizeof(options));
+  options.device_key = "MC4CAQAwBQYDK2VwBCIEIAMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDMCowBQYDK2VwAyEA7UkoxijRwsbq6QM4kFmVYSlZJzpcY/k2NsFGFKyHN9E=";
+  service = hub_service_new(&options, NULL);
+  doc = certificate_payload(hub_service_current_certificate(service, 1792500000));
+  assert_string_equal(yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(doc), "device")),
+                      "MCowBQYDK2VwAyEA7UkoxijRwsbq6QM4kFmVYSlZJzpcY/k2NsFGFKyHN9E=");
+  yyjson_doc_free(doc);
+  hub_service_free(service);
+  assert_int_equal(access(device_path, F_OK), -1);
+}
+
+static void test_pin_addresses_are_normalized(void **state) {
+  (void)state;
+  char *address;
+  hub_service_options_t options;
+  hub_service_t *service;
+
+  address = hub_service_normalize_address("1997");
+  assert_string_equal(address, "ws://localhost:1997");
+  free(address);
+  address = hub_service_normalize_address("WSS://Hub.Example.COM/");
+  assert_string_equal(address, "wss://hub.example.com");
+  free(address);
+  address = hub_service_normalize_address("ws://Host:80/Path/");
+  assert_string_equal(address, "ws://host:80/Path");
+  free(address);
+
+  /* the default hub: dialed at 127.0.0.1, pinned as ws://localhost:1997 */
+  unsetenv("HUB");
+  service = hub_service_new(NULL, NULL);
+  assert_string_equal(hub_service_address(service), "ws://127.0.0.1:1997");
+  assert_string_equal(hub_service_pin_address(service), "ws://localhost:1997");
+  hub_service_free(service);
+
+  setenv("HUB", "1998", 1);
+  service = hub_service_new(NULL, NULL);
+  assert_string_equal(hub_service_pin_address(service), "ws://localhost:1998");
+  hub_service_free(service);
+  unsetenv("HUB");
+
+  memset(&options, 0, sizeof(options));
+  options.address = "ws://Example:2000/";
+  service = hub_service_new(&options, NULL);
+  assert_string_equal(hub_service_pin_address(service), "ws://example:2000");
   hub_service_free(service);
 }
 
@@ -206,6 +298,8 @@ int main(void) {
       cmocka_unit_test_setup_teardown(test_environment_override, setup, teardown),
       cmocka_unit_test_setup_teardown(test_certificate_renews_with_a_day_left, setup, teardown),
       cmocka_unit_test_setup_teardown(test_instance_defaults, setup, teardown),
+      cmocka_unit_test_setup_teardown(test_environment_defaults, setup, teardown),
+      cmocka_unit_test_setup_teardown(test_pin_addresses_are_normalized, setup, teardown),
       cmocka_unit_test_setup_teardown(test_connect_headers_carry_the_certificate, setup, teardown),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
