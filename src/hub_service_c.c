@@ -1,7 +1,7 @@
 /*
  * hub_service_c: lite C port of hub-service (TS reference).
  *
- * Registers post/stream API endpoints and hub apps on a hub (hub-lite/hub-pro)
+ * Registers post/stream API endpoints and hub apps on a hub (hub-lite/hub-server)
  * and calls API through the hub, authenticated with the keychain `auth` key.
  *
  * The channel-c client runs on a poll loop: call hub_service_start once, then
@@ -817,7 +817,7 @@ static int service_connect(hub_service_t *service, char **out_error) {
   hub_service_connect_headers_t headers;
   channel_c_client_options_t client_options;
 
-  /* hub-pro auth: send a freshly signed token as handshake headers (as TS does), not as URL query
+  /* hub-server auth: send a freshly signed token as handshake headers (as TS does), not as URL query
      params, so it never ends up in proxy or access logs. */
   if (hub_service_build_connect_headers(service, &headers) != 0) {
     if (out_error) *out_error = channel_c_strdup("keychain failed");

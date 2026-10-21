@@ -11,7 +11,7 @@ extern "C" {
 
 /*
  * hub_service_c: lite C port of hub-service (TS reference).
- * Registers post/stream API endpoints and hub apps on a hub (hub-lite/hub-pro)
+ * Registers post/stream API endpoints and hub apps on a hub (hub-lite/hub-server)
  * and calls API through the hub. Authenticates with the keychain `auth` key
  * (see keychain.h): v0 until hub/info pins the hub key, then v1. Unless
  * disabled, every connect also sends a certificate for the service key signed

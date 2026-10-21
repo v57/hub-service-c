@@ -8,7 +8,7 @@ extern "C" {
 #endif
 
 /*
- * hub-pro auth keychain (TS hub-service/keychain.ts parity,
+ * hub-server auth keychain (TS hub-service/keychain.ts parity,
  * Docs/Devices/protocol.md section 2).
  *
  * The key file ("auth" in the working directory, or $HUBKEY) is the base64
@@ -20,7 +20,7 @@ extern "C" {
  *   sig     = base64 ed25519 signature over
  *               v0: "<expiry>"
  *               v1: "hub1:<hub SPKI>:<expiry>" (only valid on that hub)
- *   expiry  = DECIMAL epoch-seconds string of now + 60; hub-pro rejects it
+ *   expiry  = DECIMAL epoch-seconds string of now + 60; hub-server rejects it
  *             once 30 s past or more than 330 s ahead
  *
  * Hub key pins live in "hubs.json" beside the key file:

@@ -1,5 +1,5 @@
 /*
- * hub-pro auth keychain: ed25519 load-or-generate, token signing and hub key
+ * hub-server auth keychain: ed25519 load-or-generate, token signing and hub key
  * pins (Docs/Devices/protocol.md section 2).
  *
  * Key file layout (TS hub-service/keychain.ts parity):
