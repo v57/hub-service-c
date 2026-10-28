@@ -4,6 +4,8 @@ project(hub_service_c VERSION 0.1.0 LANGUAGES C)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
+# glibc hides POSIX (fchmod, clock_gettime) under strict C11; macOS ignores this.
+add_compile_definitions(_DEFAULT_SOURCE)
 
 find_package(PkgConfig REQUIRED)
 find_package(OpenSSL REQUIRED)
