@@ -195,7 +195,7 @@ static void test_caller_anonymous_and_merged(void **state) {
   (void)state;
   hub_service_caller_t *caller;
 
-  /* no hub context (hub-lite, or not through a hub) */
+  /* no hub context (not through a hub) */
   assert_null(hub_service_caller(NULL));
   assert_null(hub_service_caller("{}"));
   assert_null(hub_service_caller("{\"service\":\"abc\"}"));

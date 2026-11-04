@@ -44,17 +44,18 @@ static int teardown_test(void **state) {
 static void test_sign_token_shape(void **state) {
   (void)state;
   char token[512];
-  assert_int_equal(hub_service_keychain_sign(token, sizeof(token)), 0);
+  assert_int_equal(hub_service_keychain_sign_for_hub("HUBKEY", "NONCE", token, sizeof(token)), 0);
 
-  /* key.<pub>.<sig>.<decimal-expiry> — 4 dot-separated parts. */
-  char *parts[4];
+  /* key.<pub>.<sig>.<decimal-expiry>.<nonce> — 5 dot-separated parts. */
+  char *parts[6];
   int count = 0;
   char *copy = strdup(token);
   char *save = NULL;
-  for (char *p = strtok_r(copy, ".", &save); p && count < 4; p = strtok_r(NULL, ".", &save)) {
+  for (char *p = strtok_r(copy, ".", &save); p && count < 6; p = strtok_r(NULL, ".", &save)) {
     parts[count++] = p;
   }
-  assert_int_equal(count, 4);
+  assert_int_equal(count, 5);
+  assert_string_equal(parts[4], "NONCE");
   assert_string_equal(parts[0], "key");
   assert_int_equal(strlen(parts[1]), 60); /* base64 of 44-byte SPKI */
   assert_int_equal(strlen(parts[2]), 88); /* base64 of 64-byte sig */
@@ -82,7 +83,7 @@ static void test_public_key_round_trip(void **state) {
   assert_string_equal(pub1, pub2);
   /* token pub matches public_key() */
   char token[512];
-  assert_int_equal(hub_service_keychain_sign(token, sizeof(token)), 0);
+  assert_int_equal(hub_service_keychain_sign_for_hub("HUBKEY", "NONCE", token, sizeof(token)), 0);
   assert_memory_equal(token + 4, pub1, strlen(pub1)); /* "key." prefix */
 }
 
@@ -98,19 +99,8 @@ static void test_ts_generated_key_reproduces_public_key(void **state) {
   assert_string_equal(pub, TS_TEST_PUB);
 
   char token[512];
-  assert_int_equal(hub_service_keychain_sign(token, sizeof(token)), 0);
+  assert_int_equal(hub_service_keychain_sign_for_hub("HUBKEY", "NONCE", token, sizeof(token)), 0);
   assert_memory_equal(token + 4, TS_TEST_PUB, strlen(TS_TEST_PUB));
-}
-
-static void test_auth_query_shape(void **state) {
-  (void)state;
-  char query[1024];
-  assert_int_equal(hub_service_keychain_auth_query(query, sizeof(query)), 0);
-  assert_memory_equal(query, "?auth=key.", 9);
-  /* has the &v=0 suffix and no raw '+' '/' '=' (percent-encoded) */
-  assert_true(strstr(query, "&v=0") != NULL);
-  assert_true(strstr(query, "+") == NULL);
-  assert_true(strstr(query, "=") == NULL || strstr(query, "%3D") != NULL);
 }
 
 static void test_hub_key_pins(void **state) {
@@ -144,15 +134,19 @@ static void test_sign_for_hub_binds_the_hub_key(void **state) {
 
   char token[512];
   char expected[512];
-  assert_int_equal(hub_service_keychain_sign_for_hub("HUBKEY", token, sizeof(token)), 0);
-  const char *expiry = strrchr(token, '.') + 1;
-  long long value = atoll(expiry);
+  assert_int_equal(hub_service_keychain_sign_for_hub("HUBKEY", "NONCE", token, sizeof(token)), 0);
+  char *copy = strdup(token);
+  *strrchr(copy, '.') = '\0';
+  long long value = atoll(strrchr(copy, '.') + 1);
+  free(copy);
   long long now = (long long)time(NULL);
   assert_true(value >= now + HUB_SERVICE_AUTH_EXPIRY - 2 && value <= now + HUB_SERVICE_AUTH_EXPIRY);
-  assert_int_equal(hub_service_auth_token(TS_TEST_AUTH, "HUBKEY", value, expected, sizeof(expected)), 0);
+  assert_int_equal(hub_service_auth_token(TS_TEST_AUTH, "HUBKEY", "NONCE", value, expected, sizeof(expected)), 0);
   assert_string_equal(token, expected);
-  /* a v0 token for the same expiry has another signature */
-  assert_int_equal(hub_service_auth_token(TS_TEST_AUTH, NULL, value, expected, sizeof(expected)), 0);
+  /* another challenge or hub has another signature */
+  assert_int_equal(hub_service_auth_token(TS_TEST_AUTH, "HUBKEY", "OTHER", value, expected, sizeof(expected)), 0);
+  assert_string_not_equal(token, expected);
+  assert_int_equal(hub_service_auth_token(TS_TEST_AUTH, "OTHER", "NONCE", value, expected, sizeof(expected)), 0);
   assert_string_not_equal(token, expected);
 }
 
@@ -162,7 +156,6 @@ int main(void) {
       cmocka_unit_test_setup_teardown(test_public_key_round_trip, setup_test, teardown_test),
       cmocka_unit_test_setup_teardown(test_ts_generated_key_reproduces_public_key, setup_test,
                                       teardown_test),
-      cmocka_unit_test_setup_teardown(test_auth_query_shape, setup_test, teardown_test),
       cmocka_unit_test_setup_teardown(test_hub_key_pins, setup_test, teardown_test),
       cmocka_unit_test_setup_teardown(test_sign_for_hub_binds_the_hub_key, setup_test, teardown_test),
   };

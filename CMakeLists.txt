@@ -51,6 +51,7 @@ add_library(hub_service_c STATIC
   src/crypto.c
   src/device.c
   src/network.c
+  src/hub_proof.c
 )
 
 target_include_directories(hub_service_c
@@ -92,6 +93,7 @@ add_test(NAME unit_keychain COMMAND test_keychain)
 set(HUB_DEVICE_VECTORS "${CMAKE_CURRENT_SOURCE_DIR}/../../Docs/Devices/vectors.json")
 add_executable(test_vectors tests/test_vectors.c)
 target_compile_definitions(test_vectors PRIVATE HUB_DEVICE_VECTORS="${HUB_DEVICE_VECTORS}")
+target_include_directories(test_vectors PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(test_vectors PRIVATE hub_service_c PkgConfig::CMOCKA)
 add_test(NAME unit_vectors COMMAND test_vectors)
 

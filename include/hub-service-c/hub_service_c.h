@@ -4,6 +4,7 @@
 #include <stddef.h>
 
 #include "channel-c/channel_c.h"
+#include "hub-service-c/hub_proof.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -11,11 +12,12 @@ extern "C" {
 
 /*
  * hub_service_c: lite C port of hub-service (TS reference).
- * Registers post/stream API endpoints and hub apps on a hub (hub-lite/hub-server)
- * and calls API through the hub. Authenticates with the keychain `auth` key
- * (see keychain.h): v0 until hub/info pins the hub key, then v1. Unless
- * disabled, every connect also sends a certificate for the service key signed
- * by the device key (see device.h), renewed when less than a day is left.
+ * Registers post/stream API endpoints and hub apps on a hub (hub-server) and
+ * calls API through the hub. Authenticates with the keychain `auth` key (see
+ * keychain.h): every connect asks the hub to prove its key first (see
+ * hub_proof.h), and a hub that doesn't gets nothing. Unless disabled, every
+ * connect also sends a certificate for the service key signed by the device key
+ * (see device.h), renewed when less than a day is left.
  */
 
 typedef struct hub_service hub_service_t;
@@ -43,10 +45,13 @@ typedef struct {
   /* A caller-provided device key (key file text) used instead of the device
    * key file, for apps that keep it in their own store. NULL -> the file. */
   const char *device_key;
+  /* Non-zero: dial plain ws:// beyond loopback, the overlay and the LAN, which
+   * would carry the key unencrypted: for private networks the SDK can't
+   * recognize, such as a container's ws://hub:1997. Also HUB_ALLOW_PLAINTEXT=1. */
+  int allow_plaintext;
 } hub_service_options_t;
 
-/* Per-path settings for the hub/service/update payload (pro-only wire parity;
- * hub-lite ignores them). Zero-initialize. */
+/* Per-path settings for the hub/service/update payload. Zero-initialize. */
 typedef struct {
   /* Emit "permissions". */
   int permissions_set;
@@ -105,8 +110,8 @@ typedef struct {
 
 /*
  * The caller of a request from its context JSON (request->context_json in
- * post and stream handlers). NULL when the context has no hub caller (hub-lite,
- * or a call that didn't come through a hub). Free with hub_service_caller_free.
+ * post and stream handlers). NULL when the context has no hub caller (a call
+ * that didn't come through a hub). Free with hub_service_caller_free.
  */
 hub_service_caller_t *hub_service_caller(const char *context_json);
 void hub_service_caller_free(hub_service_caller_t *caller);
@@ -164,8 +169,13 @@ hub_service_t *hub_service_stream(hub_service_t *service, const char *path,
 hub_service_t *hub_service_app(hub_service_t *service, const hub_service_app_t *app);
 
 /*
- * Connect to the hub. Blocks until connected (or fails; channel-c connect has
- * a ~10s timeout). Returns 0 on success, -1 on failure.
+ * Connect to the hub: asks it to prove its key on an anonymous connection, then
+ * connects with a token for that answer alone. Blocks until connected (or fails;
+ * channel-c connect has a ~10s timeout). Returns 0 on success, -1 on failure.
+ * After a failure hub_service_poll keeps trying, with a growing delay, until
+ * hub_service_stop; a hub that doesn't prove its key gets nothing meanwhile. An
+ * address that would carry the key unencrypted is the one failure that opens
+ * nothing and isn't retried (see allow_plaintext).
  * On every 0->1 is_connected transition hub_service_poll sends
  * hub/profile/update (if a profile is set) then hub/service/update.
  */
@@ -174,29 +184,30 @@ int hub_service_start(hub_service_t *service, char **out_error);
 /*
  * Drive the client: polls the websocket, detects connect/disconnect
  * transitions, re-sends profile+service updates on every (re)connect, and
- * redials when the connection drops. Call in a loop (see example/echo.c).
- * On the first connection to a hub with no pinned key it calls hub/info,
- * pins the key and reconnects with a hub-bound (v1) token.
- * Returns -1 when a redial failed (the next poll tries again).
+ * redials when the connection drops, each attempt asking the hub for its proof
+ * again. Call in a loop (see example/echo.c).
+ * Returns -1 while there is no connection: a failed attempt holds the next one
+ * back, from 1 s doubling to 30 s. Each distinct failure goes to stderr once.
  */
 int hub_service_poll(hub_service_t *service);
 
-/* Stop and release the current client connection (poll stays idle until
- * hub_service_start is called again). */
+/* Stop and release the current client connection, and end any retrying (poll
+ * stays idle until hub_service_start is called again). */
 void hub_service_stop(hub_service_t *service);
 
 /*
- * Forget the hub key pinned for this service's address. Use it when a v1
- * connect keeps failing with "invalid signature" because the hub's key
- * changed on purpose; the next connect learns it again.
+ * Forget the hub key pinned for this service's address, for a hub whose key
+ * changed on purpose. The next connect pins what the hub proves.
  */
 int hub_service_forget_hub_key(hub_service_t *service);
 
-/* Call an API through the hub. Errors if the service is not started. */
+/* Call an API through the hub. Errors if the service is not started, or is
+ * between connections (poll drives the retries, so a call can't wait here): the
+ * error says why. */
 int hub_service_send(hub_service_t *service, const char *path, const char *body_json,
                      char **out_body_json, char **out_error);
 
-/* Open a stream call through the hub. Errors if the service is not started. */
+/* Open a stream call through the hub. Errors like hub_service_send. */
 int hub_service_values(hub_service_t *service, const char *path, const char *body_json,
                        channel_c_values_t **out_values, char **out_error);
 

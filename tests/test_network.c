@@ -25,6 +25,7 @@
 #include "hub-service-c/keychain.h"
 #include "hub-service-c/network.h"
 #include "network_internal.h"
+#include "fake_hub.h"
 
 static char test_dir[256];
 static char agent_path[320];
@@ -193,6 +194,12 @@ static void agent_stop(void) {
 static char *last_replace;
 static int replace_count;
 
+static int reply_info(const channel_c_post_request_t *request, char **out_body_json, char **out_error) {
+  (void)out_error;
+  *out_body_json = fake_hub_info(FAKE_HUB_KEY_FILE, FAKE_HUB_KEY, request->body_json, "challenge");
+  return 0;
+}
+
 static int reply_null(const channel_c_post_request_t *request, char **out_body_json, char **out_error) {
   (void)request;
   (void)out_error;
@@ -299,6 +306,7 @@ static void start_hub(fixture_t *fixture) {
   hub_service_options_t options;
 
   fixture->channel = channel_c_channel_new();
+  channel_c_channel_post(fixture->channel, "hub/info", reply_info, NULL, 0);
   channel_c_channel_post(fixture->channel, "hub/service/update", reply_null, NULL, 0);
   channel_c_channel_post(fixture->channel, "network/shares/replace", reply_replace, NULL, 0);
   memset(&factory, 0, sizeof(factory));

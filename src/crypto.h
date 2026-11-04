@@ -35,6 +35,9 @@ int hs_key_public(const unsigned char key[HS_KEY_BYTES], char out[HS_SPKI_B64_SI
 /* base64 ed25519 signature over data. */
 int hs_key_sign(const unsigned char key[HS_KEY_BYTES], const char *data, size_t len, char out[HS_SIG_B64_SIZE]);
 
+/* 0 when sig_b64 is a valid ed25519 signature over data by the key spki_b64. */
+int hs_key_verify(const char *spki_b64, const char *data, size_t len, const char *sig_b64);
+
 /*
  * Load the key file at path. When it is missing and create is set, generate
  * one and write it atomically with the given mode (parent directories are

@@ -215,7 +215,7 @@ static void test_environment_defaults(void **state) {
   /* HUB_DEVICE=off turns device mode off */
   setenv("HUB_DEVICE", "off", 1);
   service = hub_service_new(NULL, NULL);
-  assert_int_equal(hub_service_build_connect_headers(service, &headers), 0);
+  assert_int_equal(hub_service_build_connect_headers(service, "HUB", "NONCE", &headers), 0);
   assert_int_equal(headers.count, 2);
   hub_service_free(service);
   unsetenv("HUB_DEVICE");
@@ -276,7 +276,7 @@ static void test_connect_headers_carry_the_certificate(void **state) {
   hub_service_connect_headers_t headers;
 
   service = hub_service_new(NULL, NULL);
-  assert_int_equal(hub_service_build_connect_headers(service, &headers), 0);
+  assert_int_equal(hub_service_build_connect_headers(service, "HUB", "NONCE", &headers), 0);
   assert_int_equal(headers.count, 3);
   assert_string_equal(headers.items[2].name, "device");
   assert_non_null(strchr(headers.items[2].value, '.'));
@@ -286,7 +286,7 @@ static void test_connect_headers_carry_the_certificate(void **state) {
   memset(&options, 0, sizeof(options));
   options.disable_device = 1;
   service = hub_service_new(&options, NULL);
-  assert_int_equal(hub_service_build_connect_headers(service, &headers), 0);
+  assert_int_equal(hub_service_build_connect_headers(service, "HUB", "NONCE", &headers), 0);
   assert_int_equal(headers.count, 2);
   hub_service_connect_headers_free(&headers);
   hub_service_free(service);

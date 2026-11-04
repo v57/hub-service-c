@@ -1,18 +1,21 @@
 /*
  * hub_service_c: lite C port of hub-service (TS reference).
  *
- * Registers post/stream API endpoints and hub apps on a hub (hub-lite/hub-server)
+ * Registers post/stream API endpoints and hub apps on a hub (hub-server)
  * and calls API through the hub, authenticated with the keychain `auth` key.
  *
  * The channel-c client runs on a poll loop: call hub_service_start once, then
  * hub_service_poll in a loop. On every 0->1 is_connected transition the
  * service re-sends hub/profile/update (if a profile is set) and
- * hub/service/update (hub-lite drops services on disconnect).
+ * hub/service/update (a hub drops services on disconnect).
  *
- * Auth (Docs/Devices/protocol.md section 2): with no hub key pinned for the
- * address the service connects with v0, asks hub/info for the hub key, pins
- * it in hubs.json and reconnects with a v1 token bound to that hub. hub-lite
- * answers hub/info with an error, so the service stays on v0 there.
+ * Auth (Docs/Devices/protocol.md section 2): before every connection attempt
+ * the service asks hub/info with a fresh nonce on a short anonymous connection.
+ * Only an answer with a valid proof of the key it claims gets a token, over that
+ * answer's challenge. The first proven key is pinned in hubs.json; a hub that
+ * doesn't prove its key, or proves another than the pinned one, gets nothing and
+ * holds the next attempt back. channel-c's client has no headers hook, and the
+ * connect is ours to make, so nothing is dialed with credentials before that.
  */
 
 #include <stdarg.h>
@@ -26,6 +29,7 @@
 #include <yyjson.h>
 
 #include "hub-service-c/hub_service_c.h"
+#include "hub-service-c/hub_proof.h"
 #include "hub-service-c/device.h"
 #include "hub-service-c/keychain.h"
 #include "hub_service_internal.h"
@@ -209,8 +213,12 @@ struct hub_service {
 
   hs_network_t *network; /* declared Hub Network shares */
 
-  int started;       /* between hub_service_start and hub_service_stop */
-  int hub_key_known; /* the current connection used a pinned hub key (v1) */
+  int started;           /* between hub_service_start and hub_service_stop */
+  int allow_plaintext;   /* dial an address that would carry the key unencrypted */
+  char *refusal;         /* why hub_service_start dialed nothing, or NULL */
+  char *last_failure;    /* the failure last reported: each distinct one goes out once */
+  int retry_delay_ms;    /* the wait after the next failed attempt */
+  long long next_attempt_ms; /* no attempt before this monotonic time */
 };
 
 static int service_add_path(hub_service_t *service, const char *path, const hub_service_settings_t *settings);
@@ -466,6 +474,8 @@ hub_service_t *hub_service_new(const hub_service_options_t *options, char **out_
   if (options && options->parent) service->parent = channel_c_strdup(options->parent);
   if (options && options->device_key) service->device_key = channel_c_strdup(options->device_key);
   service->disable_device = (options && options->disable_device) || !hub_service_device_mode_enabled();
+  service->allow_plaintext = (options && options->allow_plaintext) ||
+                             (getenv("HUB_ALLOW_PLAINTEXT") && strcmp(getenv("HUB_ALLOW_PLAINTEXT"), "1") == 0);
 
   service->channel = channel_c_channel_new();
   service->network = hs_network_new();
@@ -497,6 +507,8 @@ void hub_service_free(hub_service_t *service) {
   free(service->device_name);
   free(service->parent);
   free(service->certificate);
+  channel_c_free(service->refusal);
+  channel_c_free(service->last_failure);
 
   for (index = 0; index < service->paths_count; index += 1) {
     free(service->paths[index].path);
@@ -782,16 +794,13 @@ const char *hub_service_current_certificate(hub_service_t *service, long long no
   return service->certificate;
 }
 
-int hub_service_build_connect_headers(hub_service_t *service, hub_service_connect_headers_t *out) {
-  char hub_key[128];
+int hub_service_build_connect_headers(hub_service_t *service, const char *hub_key, const char *challenge,
+                                      hub_service_connect_headers_t *out) {
   const char *certificate;
 
   memset(out, 0, sizeof(*out));
-  service->hub_key_known = hub_service_keychain_hub_key(service->pin_address, hub_key, sizeof(hub_key)) == 0;
-  if (hub_service_keychain_sign_for_hub(service->hub_key_known ? hub_key : NULL, out->auth, sizeof(out->auth)) != 0) {
-    return -1;
-  }
-  snprintf(out->v, sizeof(out->v), "%s", service->hub_key_known ? "1" : "0");
+  if (hub_service_keychain_sign_for_hub(hub_key, challenge, out->auth, sizeof(out->auth)) != 0) return -1;
+  snprintf(out->v, sizeof(out->v), "1");
   out->items[0].name = "auth";
   out->items[0].value = out->auth;
   out->items[1].name = "v";
@@ -810,19 +819,64 @@ void hub_service_connect_headers_free(hub_service_connect_headers_t *headers) {
   (void)headers;
 }
 
-/* Dial the hub with fresh handshake headers: a v1 token when a hub key is
- * pinned for the address, else v0. Headers are rebuilt on every (re)connect
- * since the token embeds an expiry. */
+/* A malloc'd message, or NULL. */
+static char *format_message(const char *format, ...) {
+  va_list args;
+  char *out;
+  int n;
+
+  va_start(args, format);
+  n = vsnprintf(NULL, 0, format, args);
+  va_end(args);
+  if (n < 0) return NULL;
+  out = (char *)malloc((size_t)n + 1);
+  if (!out) return NULL;
+  va_start(args, format);
+  vsnprintf(out, (size_t)n + 1, format, args);
+  va_end(args);
+  return out;
+}
+
+int hub_service_handshake(hub_service_t *service, hub_service_connect_headers_t *out, char **out_error) {
+  hub_service_hub_info_t info;
+  char pinned[128];
+  char *error = NULL;
+
+  memset(out, 0, sizeof(*out));
+  if (out_error) *out_error = NULL;
+  if (hub_service_ask_hub(service->address, &info, &error) != 0) {
+    if (out_error) *out_error = format_message("%s: %s, sending it nothing", service->pin_address, error ? error : "no answer");
+    channel_c_free(error);
+    return -1;
+  }
+  if (hub_service_keychain_hub_key(service->pin_address, pinned, sizeof(pinned)) != 0) {
+    if (hub_service_keychain_pin_hub_key(service->pin_address, info.key) != 0) {
+      if (out_error) *out_error = channel_c_strdup("pin hub key failed");
+      return -1;
+    }
+  } else if (strcmp(pinned, info.key) != 0) {
+    if (out_error) {
+      *out_error = format_message(
+        "%s answers with key %s, not the pinned %s, sending it nothing. hub_service_forget_hub_key if its key really changed",
+        service->pin_address, info.key, pinned);
+    }
+    return -1;
+  }
+  if (hub_service_build_connect_headers(service, info.key, info.challenge, out) != 0) {
+    if (out_error) *out_error = channel_c_strdup("keychain failed");
+    return -1;
+  }
+  return 0;
+}
+
+/* The proof first, then the hub with fresh handshake headers, as TS does: real
+ * headers, not query params, so the token never ends up in proxy or access logs.
+ * Rebuilt per attempt: a challenge is good for one connection. */
 static int service_connect(hub_service_t *service, char **out_error) {
   hub_service_connect_headers_t headers;
   channel_c_client_options_t client_options;
 
-  /* hub-server auth: send a freshly signed token as handshake headers (as TS does), not as URL query
-     params, so it never ends up in proxy or access logs. */
-  if (hub_service_build_connect_headers(service, &headers) != 0) {
-    if (out_error) *out_error = channel_c_strdup("keychain failed");
-    return -1;
-  }
+  if (hub_service_handshake(service, &headers, out_error) != 0) return -1;
   memset(&client_options, 0, sizeof(client_options));
   client_options.headers = headers.items;
   client_options.header_count = headers.count;
@@ -832,41 +886,55 @@ static int service_connect(hub_service_t *service, char **out_error) {
   return service->client ? 0 : -1;
 }
 
-/* Ask hub/info for the hub key and pin it. Returns 1 when a key was pinned
- * (the caller reconnects with v1), 0 when the hub has none (hub-lite). */
-static int service_learn_hub_key(hub_service_t *service) {
-  char *response = NULL;
-  char *error = NULL;
-  yyjson_doc *doc;
-  yyjson_val *key;
-  int pinned = 0;
+/* Holds the next attempt back, from 1 s doubling to 30 s, and reports a failure
+ * that differs from the last one. */
+static void service_attempt_failed(hub_service_t *service, const char *message) {
+  struct timespec now;
+  const char *text = message ? message : "failed to connect websocket";
 
-  if (channel_c_sender_send(channel_c_client_sender(service->client), "hub/info", NULL, NULL, &response, &error) != 0 ||
-      !response) {
-    channel_c_free(response);
-    channel_c_free(error);
-    return 0;
+  if (!service->last_failure || strcmp(service->last_failure, text) != 0) {
+    fprintf(stderr, "hub-service-c: %s\n", text);
+    channel_c_free(service->last_failure);
+    service->last_failure = channel_c_strdup(text);
   }
-  doc = yyjson_read(response, strlen(response), 0);
-  key = yyjson_obj_get(yyjson_doc_get_root(doc), "key");
-  if (yyjson_is_str(key) && yyjson_get_len(key) > 0) {
-    pinned = hub_service_keychain_pin_hub_key(service->pin_address, yyjson_get_str(key)) == 0;
-  }
-  yyjson_doc_free(doc);
-  channel_c_free(response);
-  return pinned;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  if (service->retry_delay_ms <= 0) service->retry_delay_ms = 1000;
+  service->next_attempt_ms = (long long)now.tv_sec * 1000 + now.tv_nsec / 1000000 + service->retry_delay_ms;
+  service->retry_delay_ms = service->retry_delay_ms * 2 > 30000 ? 30000 : service->retry_delay_ms * 2;
+}
+
+static void service_attempt_clear(hub_service_t *service) {
+  channel_c_free(service->last_failure);
+  service->last_failure = NULL;
+  service->retry_delay_ms = 0;
+  service->next_attempt_ms = 0;
 }
 
 int hub_service_start(hub_service_t *service, char **out_error) {
+  char *error = NULL;
+
   if (out_error) *out_error = NULL;
   if (!service) {
     if (out_error) *out_error = channel_c_strdup("invalid service");
     return -1;
   }
   if (service->client) return 0; /* already started */
+  channel_c_free(service->refusal);
+  service->refusal = NULL;
+  if (!service->allow_plaintext && hub_service_transport_of(service->address) == HUB_SERVICE_TRANSPORT_REFUSED) {
+    service->refusal = format_message(
+      "%s would carry this service's key unencrypted. Use wss://, or set allow_plaintext (HUB_ALLOW_PLAINTEXT=1) on a private network",
+      service->pin_address);
+    fprintf(stderr, "hub-service-c: %s\n", service->refusal ? service->refusal : "unencrypted address refused");
+    if (out_error) *out_error = channel_c_strdup(service->refusal ? service->refusal : "unencrypted address refused");
+    return -1;
+  }
   service->started = 1;
-  if (service_connect(service, out_error) != 0) {
-    service->started = 0;
+  service_attempt_clear(service);
+  if (service_connect(service, &error) != 0) {
+    service_attempt_failed(service, error);
+    if (out_error) *out_error = error;
+    else channel_c_free(error);
     return -1;
   }
   return 0;
@@ -878,12 +946,16 @@ int hub_service_poll(hub_service_t *service) {
   if (!service) return -1;
   if (!service->started) return 0; /* stopped */
   if (!service->client) {
-    /* Redial after a drop. channel-c's connect blocks up to ~10 s when the
-     * hub is down, which paces the retries. */
+    /* Redial after a drop or a failed attempt. */
+    struct timespec now;
     char *error = NULL;
-    int result = service_connect(service, &error);
-    channel_c_free(error);
-    if (result != 0) return -1;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    if ((long long)now.tv_sec * 1000 + now.tv_nsec / 1000000 < service->next_attempt_ms) return -1;
+    if (service_connect(service, &error) != 0) {
+      service_attempt_failed(service, error);
+      channel_c_free(error);
+      return -1;
+    }
   }
 
   (void)channel_c_client_poll(service->client);
@@ -891,14 +963,8 @@ int hub_service_poll(hub_service_t *service) {
 
   if (connected && !service->was_connected) {
     /* 0->1 transition (initial connect or reconnect): re-register with the hub */
+    service_attempt_clear(service);
     service_send_updates(service);
-    if (!service->hub_key_known && service_learn_hub_key(service)) {
-      /* Reconnect at once so the connection uses the hub-bound v1 token. */
-      channel_c_client_free(service->client);
-      service->client = NULL;
-      service->was_connected = 0;
-      return 0;
-    }
     if (hs_network_has_shares(service->network)) {
       char *error = NULL;
       if (hs_network_republish(service->network, channel_c_client_sender(service->client), &error) != 0) {
@@ -921,6 +987,7 @@ int hub_service_poll(hub_service_t *service) {
 void hub_service_stop(hub_service_t *service) {
   if (!service) return;
   service->started = 0;
+  service_attempt_clear(service);
   if (service->client) {
     channel_c_client_free(service->client);
     service->client = NULL;
@@ -1040,11 +1107,20 @@ void hub_service_caller_free(hub_service_caller_t *caller) {
 /* client calls through the hub                                        */
 /* ------------------------------------------------------------------ */
 
+/* Why a call can't go out: the refusal, the failure that holds the connection
+ * back, or that the service isn't started. malloc'd. */
+static char *service_no_client_error(const hub_service_t *service) {
+  if (service && service->refusal) return channel_c_strdup(service->refusal);
+  if (service && service->started && service->last_failure) return channel_c_strdup(service->last_failure);
+  return channel_c_strdup("Service not started");
+}
+
 int hub_service_send(hub_service_t *service, const char *path, const char *body_json,
                      char **out_body_json, char **out_error) {
   if (out_error) *out_error = NULL;
+  if (out_body_json) *out_body_json = NULL;
   if (!service || !service->client) {
-    if (out_error) *out_error = channel_c_strdup("Service not started");
+    if (out_error) *out_error = service_no_client_error(service);
     return -1;
   }
   return channel_c_sender_send(channel_c_client_sender(service->client), path, body_json, NULL, out_body_json, out_error);
@@ -1054,7 +1130,7 @@ int hub_service_values(hub_service_t *service, const char *path, const char *bod
                        channel_c_values_t **out_values, char **out_error) {
   if (out_error) *out_error = NULL;
   if (!service || !service->client) {
-    if (out_error) *out_error = channel_c_strdup("Service not started");
+    if (out_error) *out_error = service_no_client_error(service);
     return -1;
   }
   *out_values = channel_c_sender_values(channel_c_client_sender(service->client), path, body_json, NULL, out_error);

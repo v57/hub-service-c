@@ -106,6 +106,31 @@ int hs_key_generate(unsigned char key[HS_KEY_BYTES]) {
   return ok;
 }
 
+int hs_key_verify(const char *spki_b64, const char *data, size_t len, const char *sig_b64) {
+  unsigned char spki[HS_PUBLIC_DER_LENGTH];
+  unsigned char signature[64];
+  const unsigned char *cursor = spki;
+  size_t spki_len = 0;
+  size_t signature_len = 0;
+  EVP_PKEY *key;
+  EVP_MD_CTX *ctx;
+  int result = -1;
+
+  if (!spki_b64 || !data || !sig_b64) return -1;
+  if (hs_b64_decode(spki_b64, spki, sizeof(spki), &spki_len) != 0 || spki_len != sizeof(spki)) return -1;
+  if (hs_b64_decode(sig_b64, signature, sizeof(signature), &signature_len) != 0 || signature_len != sizeof(signature)) return -1;
+  key = d2i_PUBKEY(NULL, &cursor, (long)spki_len);
+  if (!key) return -1;
+  ctx = EVP_MD_CTX_new();
+  if (ctx && EVP_PKEY_id(key) == EVP_PKEY_ED25519 && EVP_DigestVerifyInit(ctx, NULL, NULL, NULL, key) == 1 &&
+      EVP_DigestVerify(ctx, signature, sizeof(signature), (const unsigned char *)data, len) == 1) {
+    result = 0;
+  }
+  EVP_MD_CTX_free(ctx);
+  EVP_PKEY_free(key);
+  return result;
+}
+
 int hs_key_public(const unsigned char key[HS_KEY_BYTES], char out[HS_SPKI_B64_SIZE]) {
   return hs_b64_encode(key + HS_PRIVATE_DER_LENGTH, HS_PUBLIC_DER_LENGTH, out, HS_SPKI_B64_SIZE);
 }

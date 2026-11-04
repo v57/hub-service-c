@@ -2,7 +2,7 @@
  * Echo service example (hub-service-c).
  *
  * Registers post "echo", post "echo/upper", and app "echo/ui" on the hub,
- * then runs the client poll loop. Start the hub first (hub-lite on :1997):
+ * then runs the client poll loop. Start the hub first (on :1997):
  *
  *   ./build/echo
  *
@@ -161,7 +161,7 @@ int main(void) {
     return 1;
   }
 
-  printf("echo service started (hub-lite :1997)\n");
+  printf("echo service started (hub on :1997)\n");
   fflush(stdout);
 
   /* self-check: call echo/upper through the hub */

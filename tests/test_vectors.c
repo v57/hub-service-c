@@ -9,6 +9,7 @@
 #include <yyjson.h>
 
 #include "hub-service-c/device.h"
+#include "hub-service-c/hub_proof.h"
 #include "hub-service-c/hub_service_c.h"
 #include "hub-service-c/keychain.h"
 
@@ -42,22 +43,51 @@ static int free_vectors(void **state) {
   return 0;
 }
 
-static void test_auth_v0(void **state) {
-  (void)state;
-  char token[512];
-  assert_int_equal(hub_service_auth_token(vector("/keys/service/keyFile"), NULL, vector_int("/auth/expiry"), token,
-                                          sizeof(token)),
-                   0);
-  assert_string_equal(token, vector("/auth/v0/header"));
-}
-
 static void test_auth_v1(void **state) {
   (void)state;
   char token[512];
   assert_int_equal(hub_service_auth_token(vector("/keys/service/keyFile"), vector("/keys/hub/publicKey"),
-                                          vector_int("/auth/expiry"), token, sizeof(token)),
+                                          vector("/auth/nonce"), vector_int("/auth/expiry"), token, sizeof(token)),
                    0);
   assert_string_equal(token, vector("/auth/v1/header"));
+}
+
+static void test_hub_info_proof(void **state) {
+  (void)state;
+  hub_service_hub_info_t info;
+  char *data = hub_service_hub_info_signed_data(vector("/keys/hub/publicKey"), vector("/hubInfo/nonce"));
+  assert_string_equal(data, vector("/hubInfo/signedData"));
+  free(data);
+
+  memset(&info, 0, sizeof(info));
+  snprintf(info.key, sizeof(info.key), "%s", vector("/keys/hub/publicKey"));
+  snprintf(info.proof, sizeof(info.proof), "%s", vector("/hubInfo/proof"));
+  snprintf(info.challenge, sizeof(info.challenge), "c");
+  assert_true(hub_service_hub_info_proves(&info, vector("/hubInfo/nonce")));
+  assert_false(hub_service_hub_info_proves(&info, "another-nonce-another-nonce"));
+  snprintf(info.key, sizeof(info.key), "%s", vector("/keys/service/publicKey"));
+  assert_false(hub_service_hub_info_proves(&info, vector("/hubInfo/nonce")));
+  snprintf(info.key, sizeof(info.key), "not base64!");
+  assert_false(hub_service_hub_info_proves(&info, vector("/hubInfo/nonce")));
+}
+
+static void test_transport(void **state) {
+  (void)state;
+  yyjson_val *cases = yyjson_ptr_get(yyjson_doc_get_root(vectors), "/transport");
+  yyjson_val *entry;
+  size_t index;
+  size_t max;
+  assert_true(yyjson_arr_size(cases) > 0);
+  yyjson_arr_foreach(cases, index, max, entry) {
+    const char *url = yyjson_get_str(yyjson_obj_get(entry, "url"));
+    const char *expected = yyjson_get_str(yyjson_obj_get(entry, "transport"));
+    const char *got = hub_service_transport_name(hub_service_transport_of(url));
+    if (strcmp(got, expected) != 0) fail_msg("%s: %s, want %s", url, got, expected);
+  }
+  assert_int_equal(hub_service_transport_of("1997"), HUB_SERVICE_TRANSPORT_LOOPBACK);
+  assert_int_equal(hub_service_transport_of("hub:1997"), HUB_SERVICE_TRANSPORT_REFUSED);
+  assert_int_equal(hub_service_transport_of("WS://LOCALHOST.:1997"), HUB_SERVICE_TRANSPORT_LOOPBACK);
+  assert_int_equal(hub_service_transport_of("ws://me@10.0.0.2:1997/x"), HUB_SERVICE_TRANSPORT_LOCAL_NETWORK);
 }
 
 static void check_certificate(const char *name, const char *instance, const char *device_name, const char *platform,
@@ -130,8 +160,9 @@ static void test_caller(void **state) {
 
 int main(void) {
   const struct CMUnitTest tests[] = {
-      cmocka_unit_test(test_auth_v0),
       cmocka_unit_test(test_auth_v1),
+      cmocka_unit_test(test_hub_info_proof),
+      cmocka_unit_test(test_transport),
       cmocka_unit_test(test_certificate),
       cmocka_unit_test(test_child_certificate),
       cmocka_unit_test(test_device_id_and_safety_code),
