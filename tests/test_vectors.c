@@ -136,8 +136,19 @@ static void test_device_id_and_safety_code(void **state) {
   char code[16];
   assert_int_equal(hub_service_device_id(vector("/keys/device/publicKey"), id, sizeof(id)), 0);
   assert_string_equal(id, vector("/keys/device/deviceId"));
-  assert_int_equal(hub_service_device_safety_code(vector("/keys/device/publicKey"), code, sizeof(code)), 0);
-  assert_string_equal(code, vector("/keys/device/safetyCode"));
+  for (int index = 0; index < 5; index++) {
+    char pointer[64];
+    char hub_key[128], device_key[128], code_value[128];
+    snprintf(pointer, sizeof(pointer), "/safetyCode/cases/%d/hubKey", index);
+    snprintf(hub_key, sizeof(hub_key), "%s", vector(pointer));
+    snprintf(pointer, sizeof(pointer), "/safetyCode/cases/%d/deviceKey", index);
+    snprintf(device_key, sizeof(device_key), "%s", vector(pointer));
+    snprintf(pointer, sizeof(pointer), "/safetyCode/cases/%d/codeValue", index);
+    snprintf(code_value, sizeof(code_value), "%s", vector(pointer));
+    assert_int_equal(hub_service_device_safety_code(hub_key, device_key, code_value, code, sizeof(code)), 0);
+    snprintf(pointer, sizeof(pointer), "/safetyCode/cases/%d/code", index);
+    assert_string_equal(code, vector(pointer));
+  }
 }
 
 static void test_caller(void **state) {

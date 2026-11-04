@@ -83,11 +83,13 @@ int hub_service_device_id(const char *spki, char *out, size_t out_size) {
   return 0;
 }
 
-int hub_service_device_safety_code(const char *spki, char *out, size_t out_size) {
+int hub_service_device_safety_code(const char *hub_key, const char *device_key, const char *code_value, char *out, size_t out_size) {
   char hex[65];
   char prefix[9];
+  char input[512];
   unsigned long n;
-  if (out_size < 8 || spki_digest(spki, hex) != 0) {
+  int length = snprintf(input, sizeof(input), "hubcode1:%s:%s:%s", hub_key, device_key, code_value);
+  if (out_size < 8 || length < 0 || (size_t)length >= sizeof(input) || hs_sha256_hex((const unsigned char *)input, (size_t)length, hex) != 0) {
     if (out_size) out[0] = '\0';
     return -1;
   }

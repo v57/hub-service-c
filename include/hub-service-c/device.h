@@ -59,8 +59,9 @@ int hub_service_device_public_key(char *out, size_t out_size);
 /* Device id: the first 32 lowercase hex characters of SHA-256(SPKI DER). */
 int hub_service_device_id(const char *spki, char *out, size_t out_size);
 
-/* Safety code shown when approving a device: "ddd ddd". */
-int hub_service_device_safety_code(const char *spki, char *out, size_t out_size);
+/* Safety code shown when approving a device: "ddd ddd". hub_key is the key this side pinned, code_value what the hub
+   picked after it had the device's key (hub/device/request). */
+int hub_service_device_safety_code(const char *hub_key, const char *device_key, const char *code_value, char *out, size_t out_size);
 
 /* This OS as a certificate platform: macos, ios, linux, windows, android or other. */
 const char *hub_service_device_platform(void);
